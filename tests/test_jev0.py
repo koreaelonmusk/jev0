@@ -127,6 +127,20 @@ class GuardTests(unittest.TestCase):
         self.assertIn(b'model artifact', result.stderr)
         self.assertEqual((self.repo / 'weights.gguf').read_bytes(), b'x\n')
 
+    def test_init_repairs_managed_hook_execute_bit(self):
+        self.assertEqual(self.cli('init').returncode, 0)
+        hook = self.repo / '.git/hooks/pre-commit'
+        hook.chmod(0o644)
+        result = self.cli('init')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(os.access(hook, os.X_OK))
+        self.assertIn('repaired pre-commit hook', result.stderr)
+
+    def test_init_leaves_no_temporary_hook_files(self):
+        self.assertEqual(self.cli('init').returncode, 0)
+        hooks = self.repo / '.git/hooks'
+        self.assertEqual(list(hooks.glob('.jev0-pre-commit-*')), [])
+
     def test_existing_hook_preserved(self):
         hook = self.repo / '.git/hooks/pre-commit'
         hook.write_text('#!/bin/sh\nexit 0\n')
@@ -192,6 +206,37 @@ class GuardTests(unittest.TestCase):
         (target / 'jev0').write_text('keep')
         self.assertEqual(install().returncode, 1)
         self.assertEqual((target / 'jev0').read_text(), 'keep')
+
+    def test_installer_repairs_execute_bit_for_identical_binary(self):
+        target = self.repo / 'bin'
+        env = dict(self.env, JEV0_BIN_DIR=str(target))
+        install = lambda: subprocess.run(
+            ['sh', str(ROOT / 'install.sh')], env=env, capture_output=True
+        )
+        self.assertEqual(install().returncode, 0)
+        binary = target / 'jev0'
+        binary.chmod(0o644)
+        self.assertEqual(install().returncode, 0)
+        self.assertTrue(os.access(binary, os.X_OK))
+
+    def test_installer_leaves_no_temporary_files(self):
+        target = self.repo / 'bin'
+        env = dict(self.env, JEV0_BIN_DIR=str(target))
+        result = subprocess.run(['sh', str(ROOT / 'install.sh')], env=env, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list(target.glob('.jev0-install.*')), [])
+
+    def test_installer_preserves_symlink_destination(self):
+        target = self.repo / 'bin'
+        target.mkdir()
+        existing = self.repo / 'existing'
+        existing.write_text('keep')
+        (target / 'jev0').symlink_to(existing)
+        env = dict(self.env, JEV0_BIN_DIR=str(target))
+        result = subprocess.run(['sh', str(ROOT / 'install.sh')], env=env, capture_output=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue((target / 'jev0').is_symlink())
+        self.assertEqual(existing.read_text(), 'keep')
 
 
 class EvaluatorTests(unittest.TestCase):
