@@ -418,6 +418,98 @@ class PolicyTests(unittest.TestCase):
         self.assertIn('2 staged files exceed budget 1', commit.stderr)
 
 
+class PolicyDriftTests(unittest.TestCase):
+    setUp = GuardTests.setUp
+    git = GuardTests.git
+    cli = GuardTests.cli
+    stage = GuardTests.stage
+
+    def write_policy(self, document):
+        path = self.repo / '.jev0.json'
+        path.write_text(json.dumps(document))
+        return path
+
+    def init_policy(self, document=None):
+        policy = self.write_policy(document or {
+            'schema_version': 1,
+            'max_files': 2,
+            'max_lines': 50,
+            'allow': ['src'],
+        })
+        result = self.cli('init', '--policy', '.jev0.json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return policy
+
+    def test_policy_check_passes_when_snapshot_matches(self):
+        self.init_policy()
+        result = self.cli('policy-check', '.jev0.json', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data['in_sync'])
+        self.assertEqual(data['reasons'], [])
+        self.assertEqual(data['expected'], data['actual'])
+
+    def test_policy_check_detects_manifest_drift(self):
+        policy = self.init_policy()
+        policy.write_text(json.dumps({
+            'schema_version': 1,
+            'max_files': 9,
+            'max_lines': 900,
+            'allow': ['src'],
+        }))
+        result = self.cli('policy-check', '.jev0.json', '--json')
+        self.assertEqual(result.returncode, 1)
+        data = json.loads(result.stdout)
+        self.assertFalse(data['in_sync'])
+        self.assertIn(
+            'policy fingerprint differs from managed hook snapshot',
+            data['reasons'],
+        )
+        self.assertIn(
+            'managed hook Layer 0 settings differ from policy',
+            data['reasons'],
+        )
+
+    def test_policy_check_detects_hook_argument_tampering(self):
+        self.init_policy()
+        hook = self.repo / '.git/hooks/pre-commit'
+        text = hook.read_text().replace('--max-files 2', '--max-files 99')
+        hook.write_text(text)
+        hook.chmod(0o755)
+        result = self.cli('policy-check', '.jev0.json', '--json')
+        self.assertEqual(result.returncode, 1)
+        data = json.loads(result.stdout)
+        self.assertFalse(data['in_sync'])
+        self.assertIn(
+            'managed hook Layer 0 settings differ from policy',
+            data['reasons'],
+        )
+
+    def test_policy_check_detects_missing_fingerprint(self):
+        self.init_policy()
+        hook = self.repo / '.git/hooks/pre-commit'
+        lines = [
+            line for line in hook.read_text().splitlines()
+            if not line.startswith('# jev0 policy sha256: ')
+        ]
+        hook.write_text('\n'.join(lines) + '\n')
+        hook.chmod(0o755)
+        result = self.cli('policy-check', '.jev0.json', '--json')
+        self.assertEqual(result.returncode, 1)
+        data = json.loads(result.stdout)
+        self.assertIn(
+            'managed hook has no policy fingerprint',
+            data['reasons'],
+        )
+
+    def test_policy_check_detects_missing_hook(self):
+        self.write_policy({'schema_version': 1})
+        result = self.cli('policy-check', '.jev0.json', '--json')
+        self.assertEqual(result.returncode, 1)
+        data = json.loads(result.stdout)
+        self.assertFalse(data['in_sync'])
+        self.assertIn('managed hook is not enforced', data['reasons'])
+
 class DoctorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
