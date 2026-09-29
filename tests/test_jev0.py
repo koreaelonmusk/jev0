@@ -193,5 +193,91 @@ class GuardTests(unittest.TestCase):
         self.assertEqual((target / 'jev0').read_text(), 'keep')
 
 
+class EvaluatorTests(unittest.TestCase):
+    """Exercise the optional Python API against real staged content."""
+
+    setUp = GuardTests.setUp
+    git = GuardTests.git
+    stage = GuardTests.stage
+
+    def evaluate(self, evaluator):
+        import argparse
+        import jev0
+        from unittest.mock import patch
+        previous = os.getcwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(self.repo)
+        with patch.dict(os.environ, self.env):
+            jev0.staged(argparse.Namespace(max_files=20, max_lines=500, allow=[]), evaluator)
+
+    def test_layer_zero_blocks_before_evaluator(self):
+        import jev0
+        from unittest.mock import Mock
+        self.stage('weights.gguf')
+        evaluator = Mock()
+        with self.assertRaisesRegex(jev0.Blocked, 'model artifact'):
+            self.evaluate(evaluator)
+        evaluator.evaluate.assert_not_called()
+
+    def test_default_does_not_generate_patch(self):
+        import jev0
+        from unittest.mock import patch
+        self.stage('src/a')
+        with patch.object(jev0, 'git', wraps=jev0.git) as calls:
+            self.evaluate(None)
+        self.assertFalse(any('--patch' in call.args for call in calls.call_args_list))
+
+    def test_evaluator_sees_only_staged_diff(self):
+        from unittest.mock import Mock
+        self.stage('src/a', b'staged value\n')
+        (self.repo / 'src/a').write_text('unstaged value\n')
+        evaluator = Mock()
+        evaluator.evaluate.return_value = (True, '')
+        self.evaluate(evaluator)
+        evaluator.evaluate.assert_called_once()
+        diff = evaluator.evaluate.call_args.args[0]
+        self.assertIn('+staged value', diff)
+        self.assertNotIn('unstaged value', diff)
+
+    def test_rejection_preserves_index(self):
+        import jev0
+        from unittest.mock import Mock
+        self.stage('src/a')
+        before = self.git('diff', '--cached')
+        evaluator = Mock()
+        evaluator.evaluate.return_value = (False, 'unrelated change')
+        with self.assertRaisesRegex(jev0.Blocked, 'Layer 1: unrelated change'):
+            self.evaluate(evaluator)
+        self.assertEqual(before, self.git('diff', '--cached'))
+
+    def test_evaluator_exception_blocks(self):
+        import jev0
+        from unittest.mock import Mock
+        self.stage('src/a')
+        evaluator = Mock()
+        evaluator.evaluate.side_effect = RuntimeError('model unavailable')
+        with self.assertRaisesRegex(jev0.Blocked, 'evaluator failed: model unavailable'):
+            self.evaluate(evaluator)
+
+    def test_invalid_results_block(self):
+        import jev0
+        from unittest.mock import Mock
+        self.stage('src/a')
+        evaluator = Mock()
+        for result in (None, True, (1, ''), ('false', ''), (True, None), [True, ''], (True,)):
+            with self.subTest(result=result):
+                evaluator.evaluate.return_value = result
+                with self.assertRaisesRegex(jev0.Blocked, 'must return'):
+                    self.evaluate(evaluator)
+
+    def test_empty_rejection_has_reason(self):
+        import jev0
+        from unittest.mock import Mock
+        evaluator = Mock()
+        evaluator.evaluate.return_value = (False, ' ')
+        with self.assertRaisesRegex(jev0.Blocked, 'rejected without a reason'):
+            self.evaluate(evaluator)
+
+
 if __name__ == '__main__':
     unittest.main()

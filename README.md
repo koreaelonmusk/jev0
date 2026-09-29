@@ -99,6 +99,42 @@ CI runs the same suite on macOS/Linux with Python 3.9/3.13. Benchmark output inc
 platform, Python version, workload, sample count, and process-launch latency.
 It measures the guard, not token savings or model inference.
 
+Baseline measurement at commit `9279307`: **54.43ms median / 64.45ms p95** on
+macOS 26.4.1, Apple Silicon arm64, Python 3.14.4; 50 fresh CLI processes checking
+one staged text file with one added line, with OS caches retained. This is a
+local Layer 0 measurement, not a Linux result or a latency guarantee. Linux CI
+verifies correctness; Linux latency has not been measured here. Interpreter,
+Git, and policy overhead were not timed separately.
+
+## Optional Layer 1 evaluator API
+
+Layer 0 remains the default: deterministic checks on structured Git metadata.
+Passing Layer 0 means the configured rules passed, not that code is bug-free.
+The optional Python API defines one structural interface in `jev0.py`:
+
+```python
+class GuardEvaluator(Protocol):
+    def evaluate(self, diff_text: str) -> tuple[bool, str]: ...
+```
+
+Call `staged(args, evaluator=your_evaluator)` to run a trusted evaluator **after**
+Layer 0 passes. `args` supplies `max_files`, `max_lines`, and `allow`, just as the
+CLI does. Any object implementing `evaluate` satisfies the interface; inheritance
+is unnecessary. Without an evaluator, no patch is generated and no model is loaded.
+
+The evaluator receives the staged unified text diff (UTF-8, undecodable bytes
+replaced), never unstaged contents. It returns `(True, reason)` to allow or
+`(False, reason)` to block. Exceptions and malformed results block; no fallback
+can override Layer 0. Git metadata checks retain their own structured input
+rather than reparsing the text patch. The index must remain unchanged throughout
+the check; this API does not lock out concurrent staging.
+
+This is an API slot, not a shipped GGUF integration. There is no model, CLI plugin
+loader, automatic discovery, or inference timeout. Evaluators execute trusted
+Python code in-process and must manage their own resources and inference limits.
+A future GGUF evaluator can implement this interface without replacing Layer 0;
+model quality, calibration, and latency still require separate validation.
+
 ## Remove or update
 
 `init` records absolute interpreter and executable paths. Keep those locations

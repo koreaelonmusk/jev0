@@ -8,10 +8,18 @@ import shlex
 import signal
 import subprocess
 import sys
+from typing import Optional, Protocol
 
 
 class Blocked(Exception):
     pass
+
+
+class GuardEvaluator(Protocol):
+    """Optional Layer 1 contract; True allows, False blocks with a reason."""
+
+    def evaluate(self, diff_text: str) -> tuple[bool, str]:
+        ...
 
 
 def git(*args):
@@ -42,7 +50,25 @@ def scope(value):
     return path
 
 
-def staged(args):
+def staged(args, evaluator: Optional[GuardEvaluator] = None):
+    heuristic_rules(args)
+    if evaluator is None:
+        return
+    diff_text = git('diff', '--cached', '--no-ext-diff', '--no-textconv',
+                    '--no-renames', '--no-color', '--patch', '--').decode('utf-8', errors='replace')
+    try:
+        result = evaluator.evaluate(diff_text)
+    except Exception as error:
+        raise Blocked('Layer 1 evaluator failed: ' + str(error)) from None
+    if (not isinstance(result, tuple) or len(result) != 2
+            or type(result[0]) is not bool or not isinstance(result[1], str)):
+        raise Blocked('Layer 1 evaluator must return (bool, str)')
+    passed, reason = result
+    if not passed:
+        raise Blocked('Layer 1: ' + (reason.strip() or 'rejected without a reason'))
+
+
+def heuristic_rules(args):
     git('rev-parse', '--show-toplevel')
     # Run at the root so scope paths have one meaning even from a subdirectory.
     root = os.fsdecode(git('rev-parse', '--show-toplevel').rstrip(b'\n'))
