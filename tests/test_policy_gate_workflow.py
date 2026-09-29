@@ -18,6 +18,10 @@ class PolicyGateWorkflowTests(unittest.TestCase):
         self.assertIn('refs/pull/${PR_NUMBER}/head:refs/remotes/jev0/pr-head', text)
         self.assertIn('EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}', text)
         self.assertIn('--base-policy .github/jev0-policy.json', text)
+        self.assertIn('python3 jev0.py range-report', text)
+        self.assertIn('cat "$EVIDENCE"', text)
+        self.assertIn('GITHUB_STEP_SUMMARY', text)
+        self.assertIn('exit "$STATUS"', text)
 
     def test_policy_gate_uses_pinned_actions(self):
         text = WORKFLOW.read_text()
