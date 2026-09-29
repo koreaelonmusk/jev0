@@ -186,12 +186,12 @@ diff size, or excess response size blocks the check. On timeout or interruption,
 jev0 kills the evaluator's POSIX process group with bounded cleanup. As with
 `jev0 run`, a process that starts another session can escape that group.
 
-Evaluator stdout/stderr are spooled outside the jev0 process heap before the
-configured response limit is enforced, so large evaluator output cannot force
-jev0 to buffer the entire response in memory. This is still a protocol/resource
-guard, not a sandbox: a malicious evaluator can consume CPU, disk, or create
-detached processes until the timeout or an external sandbox stops it. Nonzero-exit
-stderr diagnostics are truncated to the configured response limit.
+Evaluator stdout/stderr are drained incrementally with bounded in-memory
+buffers. Stdout is rejected as soon as it exceeds the configured response limit;
+stderr diagnostics retain only the configured prefix. Input diff bytes are also
+bounded before evaluator launch. This is still a protocol/resource guard, not a
+sandbox: a malicious evaluator can consume CPU or create detached processes until
+the timeout or an external sandbox stops it.
 
 Use the same options with `jev0 init` to persist the policy in a new pre-commit
 hook. Commands using repository-relative paths run from the repository root.
