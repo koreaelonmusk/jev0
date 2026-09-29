@@ -608,27 +608,8 @@ def policy_scope(value):
         raise Blocked("invalid policy scope: " + str(error)) from None
 
 
-def load_policy(path, root):
-    """Load one explicit, bounded, repository-contained Layer 0 policy."""
-
-    candidate = Path(path)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    try:
-        resolved = candidate.resolve(strict=True)
-        resolved.relative_to(root.resolve())
-    except (OSError, ValueError):
-        raise Blocked("policy must be an existing file inside the repository") from None
-    if not resolved.is_file():
-        raise Blocked("policy must be a regular file")
-
-    try:
-        with resolved.open("rb") as stream:
-            raw = stream.read(POLICY_MAX_BYTES + 1)
-    except OSError as error:
-        raise Blocked("cannot read policy: " + str(error)) from None
-    if len(raw) > POLICY_MAX_BYTES:
-        raise Blocked(f"policy exceeds {POLICY_MAX_BYTES} bytes")
+def parse_policy_document(raw):
+    """Parse one bounded Layer 0 policy document from trusted bytes."""
 
     def strict_object(pairs):
         result = {}
@@ -675,7 +656,72 @@ def load_policy(path, root):
         max_files=max_files,
         max_lines=max_lines,
         allow=allow,
-    ), resolved
+    )
+
+
+def policy_tree_path(value):
+    if (
+        not isinstance(value, str)
+        or not value
+        or ":" in value
+        or "\0" in value
+        or "\n" in value
+        or "\r" in value
+    ):
+        raise argparse.ArgumentTypeError(
+            "base policy path must be a repository-relative file path without ':'"
+        )
+    return scope(value)
+
+
+def load_policy_from_commit(commit_sha, path):
+    """Load a bounded policy blob from one already-resolved commit."""
+
+    tree_path = policy_tree_path(path)
+    object_spec = f"{commit_sha}:{tree_path}"
+    process = subprocess.Popen(
+        ["git", "show", "--no-ext-diff", "--no-textconv", object_spec],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        output, error = process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        terminate_process_group(process)
+        raise Blocked("base policy read timed out") from None
+    if process.returncode:
+        detail = error[:GIT_ERROR_BYTES].decode(errors="replace").strip()
+        suffix = ": " + detail if detail else ""
+        raise Blocked(f"cannot read base policy {tree_path!r}{suffix}")
+    if len(output) > POLICY_MAX_BYTES:
+        raise Blocked(f"policy exceeds {POLICY_MAX_BYTES} bytes")
+    return parse_policy_document(output), tree_path, hashlib.sha256(output).hexdigest()
+
+
+def load_policy(path, root):
+    """Load one explicit, bounded, repository-contained Layer 0 policy."""
+
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root.resolve())
+    except (OSError, ValueError):
+        raise Blocked("policy must be an existing file inside the repository") from None
+    if not resolved.is_file():
+        raise Blocked("policy must be a regular file")
+
+    try:
+        with resolved.open("rb") as stream:
+            raw = stream.read(POLICY_MAX_BYTES + 1)
+    except OSError as error:
+        raise Blocked("cannot read policy: " + str(error)) from None
+    if len(raw) > POLICY_MAX_BYTES:
+        raise Blocked(f"policy exceeds {POLICY_MAX_BYTES} bytes")
+
+    return parse_policy_document(raw), resolved
 
 
 def resolve_guard_settings(args):
@@ -1007,9 +1053,13 @@ def heuristic_rules(args, mode):
 
 
 def range_guard(args, evaluator: Optional[GuardEvaluator] = None):
-    settings, _, _ = resolve_guard_settings(args)
+    root = repository_root()
     base_sha = resolve_commit(args.base)
     head_sha = resolve_commit(args.head)
+    if args.base_policy is not None:
+        settings, _, _ = load_policy_from_commit(base_sha, args.base_policy)
+    else:
+        settings, _, _ = resolve_guard_settings(args)
     prefix = range_diff_prefix(base_sha, head_sha)
     heuristic_rules_for_prefix(settings, "range", prefix)
     if evaluator is not None:
@@ -1184,6 +1234,7 @@ def main():
     item = sub.add_parser("range")
     item.add_argument("base", type=commit_ref_argument)
     item.add_argument("head", type=commit_ref_argument)
+    item.add_argument("--base-policy", type=policy_tree_path)
     add_guard_arguments(item)
     item = sub.add_parser("run")
     item.add_argument("--timeout", type=duration, required=True)
@@ -1200,6 +1251,16 @@ def main():
     if args.action in ("staged", "workspace", "init", "range") and args.policy is not None:
         if args.max_files is not None or args.max_lines is not None or args.allow:
             parser.error("--policy cannot be combined with --max-files, --max-lines, or --allow")
+    if args.action == "range" and args.base_policy is not None:
+        if (
+            args.policy is not None
+            or args.max_files is not None
+            or args.max_lines is not None
+            or args.allow
+        ):
+            parser.error(
+                "--base-policy cannot be combined with --policy, --max-files, --max-lines, or --allow"
+            )
     try:
         if args.action in ("staged", "workspace", "range"):
             evaluator = build_evaluator(args)
