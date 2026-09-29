@@ -25,7 +25,7 @@ jev0 init
 those cases. Run `init` again with the same arguments safely. No shell profiles,
 agent instructions, or global Git settings are edited.
 
-## Five commands
+## Six commands
 
 ```sh
 # Check all tracked changes against HEAD, including unstaged edits.
@@ -46,6 +46,10 @@ jev0 run --timeout 30 -- python3 -m unittest discover -s tests
 # Inspect runtime, executable hash, repository, and hook state without mutation.
 jev0 doctor
 jev0 doctor --json
+
+# Validate and fingerprint one explicit Layer 0 policy manifest.
+jev0 policy .jev0.json
+jev0 policy .jev0.json --json
 ```
 
 | Check | Default |
@@ -98,11 +102,14 @@ only `schema_version`, `max_files`, `max_lines`, and `allow`.
 Evaluator commands are never loaded from repository policy files.
 
 `--policy` cannot be combined with `--max-files`, `--max-lines`, or
-`--allow`; this avoids ambiguous precedence. `jev0 init --policy ...`
-validates the manifest and snapshots its effective Layer 0 values into the
-managed hook. Later edits to the policy file therefore cannot silently weaken an
-already-installed hook. Recreate the managed hook deliberately when adopting a
-new policy.
+`--allow`; this avoids ambiguous precedence. Use `jev0 policy <path> --json`
+to validate a manifest and retrieve its normalized effective values plus SHA-256.
+
+`jev0 init --policy ...` validates the manifest, snapshots its effective Layer 0
+values into the managed hook, and records the source policy SHA-256 in a comment.
+Later edits to the policy file therefore cannot silently weaken an already-installed
+hook. `jev0 doctor` exposes that snapshot fingerprint as `hook_policy_sha256`.
+Recreate the managed hook deliberately when adopting a new policy.
 
 See [examples/policy.json](examples/policy.json) for a copyable manifest.
 
@@ -147,7 +154,9 @@ repository, and whether a jev0-managed pre-commit hook is actually executable.
 Use `jev0 doctor --json` for scripts and support reports. `runtime_ready`
 means the local runtime satisfies jev0's current Python/Git/POSIX requirements;
 `hook_enforced` is separate and only reports whether the current repository has
-an executable jev0-managed pre-commit hook. A true value is not a sandbox claim.
+an executable jev0-managed pre-commit hook. When a hook was created from a policy
+manifest, `hook_policy_sha256` records the manifest fingerprint captured at
+initialization time. A true enforcement value is not a sandbox claim.
 
 ## Universal workflow
 
