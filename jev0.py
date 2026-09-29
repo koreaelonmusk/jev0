@@ -24,6 +24,7 @@ DOCTOR_MAX_FILE_BYTES = 10_000_000
 DOCTOR_HOOK_PREFIX_BYTES = 16_384
 POLICY_SCHEMA_VERSION = 1
 POLICY_MAX_BYTES = 65_536
+EVIDENCE_SCHEMA_VERSION = 1
 DEFAULT_MAX_FILES = 20
 DEFAULT_MAX_LINES = 500
 
@@ -1000,7 +1001,7 @@ def workspace(args, evaluator: Optional[GuardEvaluator] = None):
         run_evaluator(evaluator, evaluator_diff("workspace", evaluator))
 
 
-def heuristic_rules_for_prefix(args, label, prefix):
+def inspect_change_set(prefix):
     fields = git(
         *prefix,
         "--no-ext-diff",
@@ -1010,9 +1011,16 @@ def heuristic_rules_for_prefix(args, label, prefix):
         "-z",
         "--",
     ).split(b"\0")
-    entries = [field.split(b"\t", 2) for field in fields if field]
-    if len(entries) > args.max_files:
-        raise Blocked(f"{len(entries)} {label} files exceed budget {args.max_files}")
+    entries = []
+    total = 0
+    for field in fields:
+        if not field:
+            continue
+        added, removed, raw_path = field.split(b"\t", 2)
+        path = os.fsdecode(raw_path)
+        if added != b"-" and removed != b"-":
+            total += int(added) + int(removed)
+        entries.append((added, removed, raw_path, path))
 
     active = set(
         git(
@@ -1025,27 +1033,48 @@ def heuristic_rules_for_prefix(args, label, prefix):
             "--",
         ).split(b"\0")
     )
-    total = 0
-    for added, removed, raw_path in entries:
-        path = os.fsdecode(raw_path)
+    return {
+        "entries": entries,
+        "active": active,
+        "files_changed": len(entries),
+        "lines_changed": total,
+        "paths": [entry[3] for entry in entries],
+    }
+
+
+def enforce_change_set(args, label, analysis):
+    entries = analysis["entries"]
+    if len(entries) > args.max_files:
+        raise Blocked(f"{len(entries)} {label} files exceed budget {args.max_files}")
+
+    for added, removed, raw_path, path in entries:
         if args.allow and not any(
             path == p or path.startswith(p + "/") for p in args.allow
         ):
             raise Blocked(f"outside allowed scope: {path!r}")
         parts = path.lower().split("/")
-        if raw_path in active and (
+        if raw_path in analysis["active"] and (
             path.lower().endswith((".gguf", ".bin")) or "models" in parts
         ):
             raise Blocked(f"model artifact: {path!r}")
         if added == b"-" or removed == b"-":
-            if raw_path in active:
+            if raw_path in analysis["active"]:
                 raise Blocked(f"binary change requires separate review: {path!r}")
-        else:
-            total += int(added) + int(removed)
-    if total > args.max_lines:
+
+    if analysis["lines_changed"] > args.max_lines:
         raise Blocked(
-            f"{total} added/deleted lines exceed budget {args.max_lines}"
+            f"{analysis['lines_changed']} added/deleted lines exceed budget {args.max_lines}"
         )
+    return {
+        "files_changed": analysis["files_changed"],
+        "lines_changed": analysis["lines_changed"],
+        "paths": analysis["paths"],
+    }
+
+
+def heuristic_rules_for_prefix(args, label, prefix):
+    analysis = inspect_change_set(prefix)
+    return enforce_change_set(args, label, analysis)
 
 
 def heuristic_rules(args, mode):
@@ -1062,6 +1091,69 @@ def heuristic_rules(args, mode):
             path = os.fsdecode(untracked[0])
             raise Blocked(f"untracked file requires staging/review: {path!r}")
     heuristic_rules_for_prefix(args, mode_label(mode), diff_prefix(mode))
+
+
+def range_report(args):
+    repository_root()
+    base_sha = resolve_commit(args.base)
+    head_sha = resolve_commit(args.head)
+    merge_base = git("merge-base", base_sha, head_sha).decode("ascii").strip()
+
+    policy_source = "flags"
+    policy_sha256 = None
+    policy_path = None
+    if args.base_policy is not None:
+        settings, tree_path, policy_sha256 = load_policy_from_commit(
+            base_sha, args.base_policy
+        )
+        policy_source = "base"
+        policy_path = tree_path
+    elif args.policy is not None:
+        settings, resolved = load_policy(args.policy, Path.cwd())
+        policy_source = "worktree"
+        policy_path = str(resolved)
+        policy_sha256 = file_sha256(resolved, POLICY_MAX_BYTES)
+    else:
+        settings = argparse.Namespace(
+            max_files=DEFAULT_MAX_FILES if args.max_files is None else args.max_files,
+            max_lines=DEFAULT_MAX_LINES if args.max_lines is None else args.max_lines,
+            allow=[] if args.allow is None else args.allow,
+        )
+
+    prefix = range_diff_prefix(base_sha, head_sha)
+    analysis = inspect_change_set(prefix)
+    decision = "allow"
+    reason = None
+    try:
+        stats = enforce_change_set(settings, "range", analysis)
+    except Blocked as error:
+        decision = "block"
+        reason = str(error)
+        stats = {
+            "files_changed": analysis["files_changed"],
+            "lines_changed": analysis["lines_changed"],
+            "paths": analysis["paths"],
+        }
+
+    state = {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "decision": decision,
+        "reason": reason,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "merge_base_sha": merge_base,
+        "policy_source": policy_source,
+        "policy_path": policy_path,
+        "policy_sha256": policy_sha256,
+        "policy": {
+            "max_files": settings.max_files,
+            "max_lines": settings.max_lines,
+            "allow": settings.allow,
+        },
+        **stats,
+    }
+    print(json.dumps(state, sort_keys=True, separators=(",", ":")))
+    return 0 if decision == "allow" else 1
 
 
 def range_guard(args, evaluator: Optional[GuardEvaluator] = None):
@@ -1248,6 +1340,14 @@ def main():
     item.add_argument("head", type=commit_ref_argument)
     item.add_argument("--base-policy", type=policy_tree_path)
     add_guard_arguments(item)
+    item = sub.add_parser("range-report")
+    item.add_argument("base", type=commit_ref_argument)
+    item.add_argument("head", type=commit_ref_argument)
+    item.add_argument("--base-policy", type=policy_tree_path)
+    item.add_argument("--policy", type=policy_argument)
+    item.add_argument("--max-files", type=positive)
+    item.add_argument("--max-lines", type=positive)
+    item.add_argument("--allow", type=scope, action="append")
     item = sub.add_parser("run")
     item.add_argument("--timeout", type=duration, required=True)
     item.add_argument("command", nargs=argparse.REMAINDER)
@@ -1260,10 +1360,10 @@ def main():
     item.add_argument("path", type=policy_argument)
     item.add_argument("--json", action="store_true")
     args = parser.parse_args()
-    if args.action in ("staged", "workspace", "init", "range") and args.policy is not None:
+    if args.action in ("staged", "workspace", "init", "range", "range-report") and args.policy is not None:
         if args.max_files is not None or args.max_lines is not None or args.allow:
             parser.error("--policy cannot be combined with --max-files, --max-lines, or --allow")
-    if args.action == "range" and args.base_policy is not None:
+    if args.action in ("range", "range-report") and args.base_policy is not None:
         if (
             args.policy is not None
             or args.max_files is not None
@@ -1287,6 +1387,7 @@ def main():
             "doctor": doctor,
             "policy": inspect_policy,
             "policy-check": policy_check,
+            "range-report": range_report,
         }[args.action](args) or 0
     except (Blocked, OSError, ValueError) as error:
         print("jev0: " + " ".join(str(error).splitlines()), file=sys.stderr)
