@@ -22,6 +22,10 @@ GIT_ERROR_BYTES = 8192
 DOCTOR_SCHEMA_VERSION = 1
 DOCTOR_MAX_FILE_BYTES = 10_000_000
 DOCTOR_HOOK_PREFIX_BYTES = 16_384
+POLICY_SCHEMA_VERSION = 1
+POLICY_MAX_BYTES = 65_536
+DEFAULT_MAX_FILES = 20
+DEFAULT_MAX_LINES = 500
 
 
 class Blocked(Exception):
@@ -511,6 +515,93 @@ def doctor(args):
     return 0
 
 
+def policy_scope(value):
+    if not isinstance(value, str):
+        raise Blocked("policy allow entries must be strings")
+    try:
+        return scope(value)
+    except argparse.ArgumentTypeError as error:
+        raise Blocked("invalid policy scope: " + str(error)) from None
+
+
+def load_policy(path, root):
+    """Load one explicit, bounded, repository-contained Layer 0 policy."""
+
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root.resolve())
+    except (OSError, ValueError):
+        raise Blocked("policy must be an existing file inside the repository") from None
+    if not resolved.is_file():
+        raise Blocked("policy must be a regular file")
+
+    try:
+        size = resolved.stat().st_size
+    except OSError as error:
+        raise Blocked("cannot stat policy: " + str(error)) from None
+    if size > POLICY_MAX_BYTES:
+        raise Blocked(f"policy exceeds {POLICY_MAX_BYTES} bytes")
+
+    try:
+        raw = resolved.read_bytes()
+        document = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raise Blocked("policy must be valid UTF-8 JSON") from None
+
+    if not isinstance(document, dict):
+        raise Blocked("policy root must be a JSON object")
+    allowed_keys = {"schema_version", "max_files", "max_lines", "allow"}
+    unknown = set(document) - allowed_keys
+    if unknown:
+        raise Blocked("unknown policy keys: " + ", ".join(sorted(unknown)))
+    if type(document.get("schema_version")) is not int:
+        raise Blocked("policy schema_version must be an integer")
+    if document["schema_version"] != POLICY_SCHEMA_VERSION:
+        raise Blocked(
+            f"unsupported policy schema_version {document['schema_version']}"
+        )
+
+    max_files = document.get("max_files", DEFAULT_MAX_FILES)
+    max_lines = document.get("max_lines", DEFAULT_MAX_LINES)
+    if type(max_files) is not int or max_files <= 0:
+        raise Blocked("policy max_files must be a positive integer")
+    if type(max_lines) is not int or max_lines <= 0:
+        raise Blocked("policy max_lines must be a positive integer")
+
+    raw_allow = document.get("allow", [])
+    if not isinstance(raw_allow, list):
+        raise Blocked("policy allow must be an array")
+    allow = [policy_scope(value) for value in raw_allow]
+
+    return argparse.Namespace(
+        max_files=max_files,
+        max_lines=max_lines,
+        allow=allow,
+    ), resolved
+
+
+def resolve_guard_settings(args):
+    """Resolve CLI defaults or one explicit policy into Layer 0 settings."""
+
+    root = repository_root()
+    policy = getattr(args, "policy", None)
+    if policy:
+        settings, policy_file = load_policy(policy, root)
+        return settings, policy_file, root
+
+    max_files = getattr(args, "max_files", None)
+    max_lines = getattr(args, "max_lines", None)
+    allow = getattr(args, "allow", None)
+    return argparse.Namespace(
+        max_files=DEFAULT_MAX_FILES if max_files is None else max_files,
+        max_lines=DEFAULT_MAX_LINES if max_lines is None else max_lines,
+        allow=[] if allow is None else allow,
+    ), None, root
+
+
 def positive(value):
     number = int(value)
     if number <= 0:
@@ -623,13 +714,15 @@ def run_evaluator(evaluator, diff_text):
 
 
 def staged(args, evaluator: Optional[GuardEvaluator] = None):
-    heuristic_rules(args, "staged")
+    settings, _, _ = resolve_guard_settings(args)
+    heuristic_rules(settings, "staged")
     if evaluator is not None:
         run_evaluator(evaluator, evaluator_diff("staged", evaluator))
 
 
 def workspace(args, evaluator: Optional[GuardEvaluator] = None):
-    heuristic_rules(args, "workspace")
+    settings, _, _ = resolve_guard_settings(args)
+    heuristic_rules(settings, "workspace")
     if evaluator is not None:
         run_evaluator(evaluator, evaluator_diff("workspace", evaluator))
 
@@ -747,7 +840,7 @@ def ensure_managed_hook(hook, content):
 
 
 def init(args):
-    root = Path(os.fsdecode(git("rev-parse", "--show-toplevel").rstrip(b"\n")))
+    settings, policy_file, root = resolve_guard_settings(args)
     custom = subprocess.run(
         ["git", "config", "--get", "core.hooksPath"],
         stdout=subprocess.PIPE,
@@ -767,13 +860,20 @@ def init(args):
         sys.executable,
         str(Path(__file__).resolve()),
         "staged",
-        "--max-files",
-        str(args.max_files),
-        "--max-lines",
-        str(args.max_lines),
     ]
-    for allowed in args.allow:
-        command.extend(["--allow", allowed])
+    if policy_file is not None:
+        command.extend(["--policy", str(policy_file)])
+    else:
+        command.extend(
+            [
+                "--max-files",
+                str(settings.max_files),
+                "--max-lines",
+                str(settings.max_lines),
+            ]
+        )
+        for allowed in settings.allow:
+            command.extend(["--allow", allowed])
     if args.evaluator_command:
         command.extend(
             [
@@ -832,9 +932,10 @@ def build_evaluator(args):
 
 
 def add_guard_arguments(item):
-    item.add_argument("--max-files", type=positive, default=20)
-    item.add_argument("--max-lines", type=positive, default=500)
-    item.add_argument("--allow", type=scope, action="append", default=[])
+    item.add_argument("--policy")
+    item.add_argument("--max-files", type=positive)
+    item.add_argument("--max-lines", type=positive)
+    item.add_argument("--allow", type=scope, action="append")
     item.add_argument("--evaluator-command", type=evaluator_command)
     item.add_argument("--evaluator-timeout", type=duration, default=30.0)
     item.add_argument("--max-diff-bytes", type=positive, default=1_000_000)
@@ -853,6 +954,9 @@ def main():
     item = sub.add_parser("doctor")
     item.add_argument("--json", action="store_true")
     args = parser.parse_args()
+    if args.action in ("staged", "workspace", "init") and args.policy:
+        if args.max_files is not None or args.max_lines is not None or args.allow:
+            parser.error("--policy cannot be combined with --max-files, --max-lines, or --allow")
     try:
         if args.action in ("staged", "workspace"):
             evaluator = build_evaluator(args)
