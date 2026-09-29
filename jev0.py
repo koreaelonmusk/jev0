@@ -5,11 +5,13 @@ import json
 import math
 import os
 from pathlib import Path
+import selectors
 import shlex
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Optional, Protocol
 
 VERSION = "0.3.0-dev"
@@ -41,35 +43,28 @@ class ProcessEvaluator:
         payload = diff_text.encode("utf-8")
         if len(payload) > self.max_diff_bytes:
             raise Blocked(f"Layer 1 diff exceeds {self.max_diff_bytes} bytes")
-        with tempfile.TemporaryFile() as output_stream, tempfile.TemporaryFile() as error_stream:
+        with tempfile.TemporaryFile() as input_stream:
+            input_stream.write(payload)
+            input_stream.seek(0)
             process = subprocess.Popen(
                 self.command,
-                stdin=subprocess.PIPE,
-                stdout=output_stream,
-                stderr=error_stream,
+                stdin=input_stream,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 start_new_session=True,
             )
             try:
-                process.communicate(payload, timeout=self.timeout)
+                output, error = capture_process_output(
+                    process, self.timeout, self.max_output_bytes
+                )
             except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
                 terminate_process_group(process)
                 if isinstance(error, KeyboardInterrupt):
                     raise Blocked("Layer 1 evaluator interrupted") from None
                 raise Blocked(f"Layer 1 evaluator exceeded {self.timeout:g}s") from None
 
-            # stdout/stderr are regular temporary files, so evaluator descendants
-            # cannot keep this parent waiting for pipe EOF after the leader exits.
-            # Avoid killpg() on normal completion because the leader PID may be reused.
-            output_stream.seek(0)
-            output = output_stream.read(self.max_output_bytes + 1)
-            if len(output) > self.max_output_bytes:
-                raise Blocked(f"Layer 1 output exceeds {self.max_output_bytes} bytes")
-
             if process.returncode:
-                error_stream.seek(0)
-                detail = error_stream.read(self.max_output_bytes).decode(
-                    errors="replace"
-                ).strip()
+                detail = error.decode(errors="replace").strip()
                 suffix = ": " + detail if detail else ""
                 raise Blocked(f"Layer 1 evaluator exited {process.returncode}{suffix}")
 
@@ -85,6 +80,71 @@ class ProcessEvaluator:
         ):
             raise Blocked("Layer 1 JSON must contain only passed (bool) and reason (str)")
         return result["passed"], result["reason"]
+
+
+def capture_process_output(process, timeout, max_output_bytes):
+    """Drain evaluator pipes with bounded memory and a finite deadline."""
+
+    if os.name != "posix":
+        raise Blocked("Layer 1 process evaluators currently require macOS or Linux")
+
+    output = bytearray()
+    error = bytearray()
+    stdout_bytes = 0
+    selector = selectors.DefaultSelector()
+    streams = ((process.stdout, "stdout"), (process.stderr, "stderr"))
+    for stream, name in streams:
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ, name)
+
+    deadline = time.monotonic() + timeout
+    try:
+        while selector.get_map():
+            returncode = process.poll()
+            if returncode is not None:
+                wait = 0
+            else:
+                wait = deadline - time.monotonic()
+                if wait <= 0:
+                    raise subprocess.TimeoutExpired(process.args, timeout)
+
+            events = selector.select(wait)
+            if not events:
+                if returncode is not None:
+                    break
+                continue
+
+            for key, _ in events:
+                try:
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+
+                if key.data == "stdout":
+                    stdout_bytes += len(chunk)
+                    if stdout_bytes > max_output_bytes:
+                        terminate_process_group(process)
+                        raise Blocked(
+                            f"Layer 1 output exceeds {max_output_bytes} bytes"
+                        )
+                    output.extend(chunk)
+                elif len(error) < max_output_bytes:
+                    remaining = max_output_bytes - len(error)
+                    error.extend(chunk[:remaining])
+
+        if process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(process.args, timeout)
+            process.wait(timeout=remaining)
+        return bytes(output), bytes(error)
+    finally:
+        selector.close()
+        close_process_pipes(process)
 
 
 def close_process_pipes(process):
