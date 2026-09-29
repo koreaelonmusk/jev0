@@ -239,6 +239,11 @@ The JSON schema is versioned and includes:
 enforcement function, so the report is evidence of the same decision rather than
 a second implementation of the rules.
 
+Range metadata is resource-bounded before parsing: jev0 reads at most 8 MiB
+from each Git metadata stream. Evidence JSON includes at most 1000 changed paths
+while preserving `paths_total` and `paths_truncated`, so extremely large change
+sets cannot force unbounded report growth.
+
 ## Universal workflow
 
 A practical tool-agnostic loop is:

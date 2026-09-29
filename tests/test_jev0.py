@@ -825,6 +825,57 @@ class RangeEvidenceTests(unittest.TestCase):
         self.assertIn('exceed budget 1', json.loads(reported.stdout)['reason'])
 
 
+    def test_range_report_truncates_evidence_paths_without_losing_counts(self):
+        import jev0
+        from unittest.mock import patch
+
+        base = self.commit_file('base.txt', b'base\n', 'base')
+        self.commit_file('src/a.py', b'a\n', 'a')
+        self.commit_file('src/b.py', b'b\n', 'b')
+        head = self.commit_file('src/c.py', b'c\n', 'c')
+
+        previous = os.getcwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(self.repo)
+        args = type('Args', (), {
+            'base': base,
+            'head': head,
+            'base_policy': None,
+            'policy': None,
+            'max_files': 10,
+            'max_lines': 10,
+            'allow': None,
+        })()
+        with patch.object(jev0, 'EVIDENCE_MAX_PATHS', 2):
+            from io import StringIO
+            with patch('sys.stdout', new_callable=StringIO) as stdout:
+                rc = jev0.range_report(args)
+                data = json.loads(stdout.getvalue())
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(data['files_changed'], 3)
+        self.assertEqual(data['paths_total'], 3)
+        self.assertTrue(data['paths_truncated'])
+        self.assertEqual(len(data['paths']), 2)
+
+    def test_range_metadata_read_is_bounded_before_full_buffering(self):
+        import jev0
+        from unittest.mock import patch
+
+        base = self.commit_file('base.txt', b'base\n', 'base')
+        head = self.commit_file('very-long-name-for-limit.py', b'x\n', 'head')
+
+        previous = os.getcwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(self.repo)
+        with patch.object(jev0, 'CHANGE_METADATA_MAX_BYTES', 8):
+            with self.assertRaisesRegex(
+                jev0.Blocked,
+                'change metadata exceeds 8 bytes',
+            ):
+                jev0.inspect_change_set(jev0.range_diff_prefix(base, head))
+
+
 class DoctorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
