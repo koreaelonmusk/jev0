@@ -640,6 +640,12 @@ def scope(value):
     return path
 
 
+def policy_argument(value):
+    if not value:
+        raise argparse.ArgumentTypeError("policy path must not be empty")
+    return value
+
+
 def evaluator_command(value):
     try:
         command = json.loads(value)
@@ -936,7 +942,7 @@ def build_evaluator(args):
 
 
 def add_guard_arguments(item):
-    item.add_argument("--policy")
+    item.add_argument("--policy", type=policy_argument)
     item.add_argument("--max-files", type=positive)
     item.add_argument("--max-lines", type=positive)
     item.add_argument("--allow", type=scope, action="append")
@@ -958,7 +964,7 @@ def main():
     item = sub.add_parser("doctor")
     item.add_argument("--json", action="store_true")
     args = parser.parse_args()
-    if args.action in ("staged", "workspace", "init") and args.policy:
+    if args.action in ("staged", "workspace", "init") and args.policy is not None:
         if args.max_files is not None or args.max_lines is not None or args.allow:
             parser.error("--policy cannot be combined with --max-files, --max-lines, or --allow")
     try:
