@@ -539,16 +539,27 @@ def load_policy(path, root):
         raise Blocked("policy must be a regular file")
 
     try:
-        size = resolved.stat().st_size
+        with resolved.open("rb") as stream:
+            raw = stream.read(POLICY_MAX_BYTES + 1)
     except OSError as error:
-        raise Blocked("cannot stat policy: " + str(error)) from None
-    if size > POLICY_MAX_BYTES:
+        raise Blocked("cannot read policy: " + str(error)) from None
+    if len(raw) > POLICY_MAX_BYTES:
         raise Blocked(f"policy exceeds {POLICY_MAX_BYTES} bytes")
 
+    def strict_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise Blocked(f"duplicate policy key: {key}")
+            result[key] = value
+        return result
+
     try:
-        raw = resolved.read_bytes()
-        document = json.loads(raw.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        document = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=strict_object,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError):
         raise Blocked("policy must be valid UTF-8 JSON") from None
 
     if not isinstance(document, dict):
