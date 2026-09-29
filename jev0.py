@@ -416,15 +416,69 @@ def heuristic_rules(args, mode):
         )
 
 
+def ensure_managed_hook(hook, content):
+    """Install a managed hook atomically without overwriting user content."""
+
+    if hook.is_symlink():
+        raise Blocked("existing hook is a symlink; integrate manually")
+    if hook.exists():
+        if hook.read_text() == content:
+            if not os.access(hook, os.X_OK):
+                hook.chmod(0o755)
+                return "repaired"
+            return "unchanged"
+        raise Blocked(
+            "existing pre-commit hook preserved; integrate jev0 staged manually"
+        )
+
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".jev0-pre-commit-", dir=hook.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(0o755)
+        try:
+            os.link(temporary, hook)
+        except FileExistsError:
+            # Another process won the create race. Accept only an identical
+            # managed hook; never replace content we did not create.
+            if hook.is_symlink():
+                raise Blocked("existing hook is a symlink; integrate manually") from None
+            if hook.exists() and hook.read_text() == content:
+                if not os.access(hook, os.X_OK):
+                    hook.chmod(0o755)
+                    return "repaired"
+                return "unchanged"
+            raise Blocked(
+                "existing pre-commit hook preserved; integrate jev0 staged manually"
+            ) from None
+        return "installed"
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def init(args):
     root = Path(os.fsdecode(git("rev-parse", "--show-toplevel").rstrip(b"\n")))
     custom = subprocess.run(
-        ["git", "config", "--get", "core.hooksPath"], stdout=subprocess.PIPE
+        ["git", "config", "--get", "core.hooksPath"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
-    if custom.returncode != 1:
+    if custom.returncode == 0:
         raise Blocked(
             "custom core.hooksPath: integrate jev0 staged into your existing hook manager"
         )
+    if custom.returncode != 1:
+        detail = custom.stderr.decode(errors="replace").strip()
+        raise Blocked("Git operation failed: " + detail)
     hook = Path(
         os.fsdecode(git("rev-parse", "--git-path", "hooks/pre-commit").rstrip(b"\n"))
     ).absolute()
@@ -457,19 +511,11 @@ def init(args):
         + shlex.join(command)
         + "\n"
     )
-    if hook.is_symlink():
-        raise Blocked("existing hook is a symlink; integrate manually")
-    if hook.exists():
-        if hook.read_text() == content and os.access(hook, os.X_OK):
-            return
-        raise Blocked(
-            "existing pre-commit hook preserved; integrate jev0 staged manually"
-        )
-    hook.parent.mkdir(parents=True, exist_ok=True)
-    with hook.open("x") as stream:
-        stream.write(content)
-    hook.chmod(0o755)
-    print(f"jev0: installed pre-commit hook for {root}", file=sys.stderr)
+    outcome = ensure_managed_hook(hook, content)
+    if outcome == "installed":
+        print(f"jev0: installed pre-commit hook for {root}", file=sys.stderr)
+    elif outcome == "repaired":
+        print(f"jev0: repaired pre-commit hook for {root}", file=sys.stderr)
 
 
 def run(args):
