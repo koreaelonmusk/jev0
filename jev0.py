@@ -1278,12 +1278,91 @@ def evidence_verify(args):
     if args.require_current_verifier and not verifier_match:
         raise Blocked("evidence verifier does not match current jev0")
 
+    repository_match = None
+    if args.repo_check:
+        root = repository_root()
+        actual_base = resolve_commit(evidence["base_sha"])
+        actual_head = resolve_commit(evidence["head_sha"])
+        if actual_base != evidence["base_sha"]:
+            raise Blocked("evidence base_sha does not resolve exactly in repository")
+        if actual_head != evidence["head_sha"]:
+            raise Blocked("evidence head_sha does not resolve exactly in repository")
+
+        actual_merge_base = git("merge-base", actual_base, actual_head).decode("ascii").strip()
+        if actual_merge_base != evidence["merge_base_sha"]:
+            raise Blocked("evidence merge_base_sha does not match repository")
+
+        settings = argparse.Namespace(
+            max_files=evidence["policy"]["max_files"],
+            max_lines=evidence["policy"]["max_lines"],
+            allow=evidence["policy"]["allow"],
+        )
+        analysis = inspect_change_set(range_diff_prefix(actual_base, actual_head))
+        actual_stats = {
+            "files_changed": analysis["files_changed"],
+            "lines_changed": analysis["lines_changed"],
+            "paths": analysis["paths"],
+            "paths_truncated": analysis["paths_truncated"],
+            "paths_total": analysis["paths_total"],
+        }
+        for key, value in actual_stats.items():
+            if evidence[key] != value:
+                raise Blocked(f"evidence {key} does not match repository diff")
+
+        actual_decision = "allow"
+        actual_reason = None
+        try:
+            enforce_change_set(settings, "range", analysis)
+        except Blocked as error:
+            actual_decision = "block"
+            actual_reason = str(error)
+        if evidence["decision"] != actual_decision:
+            raise Blocked("evidence decision does not match repository diff")
+        if evidence["reason"] != actual_reason:
+            raise Blocked("evidence reason does not match repository diff")
+
+        if evidence["policy_source"] == "base":
+            actual_settings, tree_path, policy_sha = load_policy_from_commit(
+                actual_base, evidence["policy_path"]
+            )
+            if policy_sha != evidence["policy_sha256"]:
+                raise Blocked("evidence base policy SHA-256 does not match repository")
+            if {
+                "max_files": actual_settings.max_files,
+                "max_lines": actual_settings.max_lines,
+                "allow": actual_settings.allow,
+            } != evidence["policy"]:
+                raise Blocked("evidence base policy values do not match repository")
+            if tree_path != evidence["policy_path"]:
+                raise Blocked("evidence base policy path does not match repository")
+        elif evidence["policy_source"] == "worktree":
+            policy_path = Path(evidence["policy_path"])
+            try:
+                resolved = policy_path.resolve(strict=True)
+                resolved.relative_to(root.resolve())
+            except (OSError, ValueError):
+                raise Blocked(
+                    "evidence worktree policy is not available inside current repository"
+                ) from None
+            if file_sha256(resolved, POLICY_MAX_BYTES) != evidence["policy_sha256"]:
+                raise Blocked("evidence worktree policy SHA-256 does not match repository")
+            current_settings, _ = load_policy(str(resolved), root)
+            if {
+                "max_files": current_settings.max_files,
+                "max_lines": current_settings.max_lines,
+                "allow": current_settings.allow,
+            } != evidence["policy"]:
+                raise Blocked("evidence worktree policy values do not match repository")
+
+        repository_match = True
+
     result = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "valid": True,
         "evidence_sha256": supplied,
         "verifier_sha256": evidence["verifier_sha256"],
         "current_verifier_match": verifier_match,
+        "repository_match": repository_match,
     }
     if args.json:
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
@@ -1292,6 +1371,8 @@ def evidence_verify(args):
         print(f"evidence_sha256: {supplied}")
         print(f"verifier_sha256: {evidence['verifier_sha256']}")
         print("current_verifier_match: " + ("yes" if verifier_match else "no"))
+        if repository_match is not None:
+            print("repository_match: " + ("yes" if repository_match else "no"))
     return 0
 
 
@@ -1573,6 +1654,7 @@ def main():
     item.add_argument("path")
     item.add_argument("--json", action="store_true")
     item.add_argument("--require-current-verifier", action="store_true")
+    item.add_argument("--repo-check", action="store_true")
     args = parser.parse_args()
     if args.action in ("staged", "workspace", "init", "range", "range-report") and args.policy is not None:
         if args.max_files is not None or args.max_lines is not None or args.allow:
