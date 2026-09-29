@@ -1028,6 +1028,115 @@ class EvidenceVerifyTests(unittest.TestCase):
         )
 
 
+class EvidenceRepoCheckTests(unittest.TestCase):
+    setUp = GuardTests.setUp
+    git = GuardTests.git
+    cli = GuardTests.cli
+
+    def commit_file(self, name, data, message):
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        self.git('add', '-f', '--', name)
+        self.git('commit', '-qm', message)
+        return self.git('rev-parse', 'HEAD').decode().strip()
+
+    def make_report(self, *extra):
+        base = self.commit_file('base.txt', b'base\n', 'base')
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        result = self.cli('range-report', base, head, *extra)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = self.repo / 'evidence.json'
+        path.write_text(result.stdout)
+        return path, json.loads(result.stdout)
+
+    def test_repo_check_accepts_matching_repository(self):
+        path, _ = self.make_report()
+        result = self.cli('evidence-verify', str(path), '--repo-check', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data['repository_match'])
+
+    def test_repo_check_detects_tampered_diff_statistics_even_with_valid_digest(self):
+        path, evidence = self.make_report()
+        evidence['lines_changed'] = 999
+        unsigned = dict(evidence)
+        unsigned.pop('evidence_sha256')
+        canonical = json.dumps(
+            unsigned, sort_keys=True, separators=(',', ':'), ensure_ascii=False
+        ).encode('utf-8')
+        evidence['evidence_sha256'] = hashlib.sha256(canonical).hexdigest()
+        path.write_text(json.dumps(evidence))
+        result = self.cli('evidence-verify', str(path), '--repo-check')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('lines_changed does not match repository diff', result.stderr)
+
+    def test_repo_check_detects_missing_git_objects(self):
+        path, evidence = self.make_report()
+        evidence['head_sha'] = '0' * 40
+        unsigned = dict(evidence)
+        unsigned.pop('evidence_sha256')
+        canonical = json.dumps(
+            unsigned, sort_keys=True, separators=(',', ':'), ensure_ascii=False
+        ).encode('utf-8')
+        evidence['evidence_sha256'] = hashlib.sha256(canonical).hexdigest()
+        path.write_text(json.dumps(evidence))
+        result = self.cli('evidence-verify', str(path), '--repo-check')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('cannot resolve commit ref', result.stderr)
+
+    def test_repo_check_validates_base_policy_blob(self):
+        policy = self.repo / '.jev0.json'
+        policy.write_text(json.dumps({
+            'schema_version': 1,
+            'max_files': 5,
+            'max_lines': 5,
+        }))
+        self.git('add', '.jev0.json')
+        self.git('commit', '-qm', 'policy')
+        base = self.git('rev-parse', 'HEAD').decode().strip()
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        report = self.cli(
+            'range-report', base, head,
+            '--base-policy', '.jev0.json',
+        )
+        self.assertEqual(report.returncode, 0, report.stderr)
+        path = self.repo / 'evidence.json'
+        path.write_text(report.stdout)
+        result = self.cli('evidence-verify', str(path), '--repo-check', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)['repository_match'])
+
+    def test_repo_check_rejects_worktree_policy_drift(self):
+        policy = self.repo / '.jev0.json'
+        policy.write_text(json.dumps({
+            'schema_version': 1,
+            'max_files': 5,
+            'max_lines': 5,
+        }))
+        base = self.commit_file('base.txt', b'base\n', 'base')
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        report = self.cli(
+            'range-report', base, head,
+            '--policy', '.jev0.json',
+        )
+        self.assertEqual(report.returncode, 0, report.stderr)
+        path = self.repo / 'evidence.json'
+        path.write_text(report.stdout)
+
+        policy.write_text(json.dumps({
+            'schema_version': 1,
+            'max_files': 99,
+            'max_lines': 99,
+        }))
+        result = self.cli('evidence-verify', str(path), '--repo-check')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            'worktree policy SHA-256 does not match repository',
+            result.stderr,
+        )
+
+
 class DoctorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
