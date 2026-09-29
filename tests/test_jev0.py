@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import shlex
@@ -257,6 +258,25 @@ class PolicyTests(unittest.TestCase):
         self.stage('a', b'a\nb\n')
         self.blocked(self.cli('staged', '--policy', '.jev0.json'), '2 added/deleted')
 
+    def test_policy_inspector_reports_effective_values_and_fingerprint(self):
+        policy = self.write_policy({
+            'schema_version': 1,
+            'max_files': 7,
+            'allow': ['src', 'tests'],
+        })
+        result = self.cli('policy', '.jev0.json', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['schema_version'], 1)
+        self.assertEqual(data['max_files'], 7)
+        self.assertEqual(data['max_lines'], 500)
+        self.assertEqual(data['allow'], ['src', 'tests'])
+        self.assertEqual(data['policy_path'], str(policy.resolve()))
+        self.assertEqual(
+            data['policy_sha256'],
+            hashlib.sha256(policy.read_bytes()).hexdigest(),
+        )
+
     def test_policy_is_never_auto_discovered(self):
         self.write_policy({'schema_version': 1, 'max_lines': 1})
         self.stage('a', b'a\nb\n')
@@ -358,6 +378,7 @@ class PolicyTests(unittest.TestCase):
             'max_lines': 50,
             'allow': ['src'],
         })
+        fingerprint = hashlib.sha256(policy.read_bytes()).hexdigest()
         result = self.cli('init', '--policy', '.jev0.json')
         self.assertEqual(result.returncode, 0, result.stderr)
         hook = (self.repo / '.git/hooks/pre-commit').read_text()
@@ -365,12 +386,25 @@ class PolicyTests(unittest.TestCase):
         self.assertIn('--max-lines 50', hook)
         self.assertIn('--allow src', hook)
         self.assertNotIn('--policy', hook)
+        self.assertIn(f'# jev0 policy sha256: {fingerprint}', hook)
+
+        doctor = self.cli('doctor', '--json')
+        self.assertEqual(doctor.returncode, 0, doctor.stderr)
+        self.assertEqual(
+            json.loads(doctor.stdout)['hook_policy_sha256'],
+            fingerprint,
+        )
 
         policy.write_text(json.dumps({
             'schema_version': 1,
             'max_files': 100,
             'max_lines': 5000,
         }))
+        doctor_after = self.cli('doctor', '--json')
+        self.assertEqual(
+            json.loads(doctor_after.stdout)['hook_policy_sha256'],
+            fingerprint,
+        )
         self.stage('src/a')
         self.stage('src/b')
         commit = subprocess.run(
