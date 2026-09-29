@@ -69,6 +69,41 @@ stderr line. Files and index entries are never rolled back or discarded.
 `run` forwards output and the command's exit status; timeout or launch failure
 returns **1**. Invalid CLI arguments return **2**.
 
+## Versioned Layer 0 policy
+
+Use an explicit JSON manifest when multiple people or agents need the same
+deterministic Layer 0 budgets:
+
+```json
+{
+  "schema_version": 1,
+  "max_files": 10,
+  "max_lines": 300,
+  "allow": ["src", "tests", "README.md"]
+}
+```
+
+```sh
+jev0 workspace --policy .jev0.json
+jev0 staged --policy .jev0.json
+jev0 init --policy .jev0.json
+```
+
+Policy loading is deliberately **explicit**. jev0 never auto-discovers
+`.jev0.json` or another repository file. The manifest is bounded to 64 KiB,
+must resolve to a file inside the repository, rejects unknown keys, and currently
+permits only `schema_version`, `max_files`, `max_lines`, and `allow`.
+Evaluator commands are never loaded from repository policy files.
+
+`--policy` cannot be combined with `--max-files`, `--max-lines`, or
+`--allow`; this avoids ambiguous precedence. `jev0 init --policy ...`
+validates the manifest and snapshots its effective Layer 0 values into the
+managed hook. Later edits to the policy file therefore cannot silently weaken an
+already-installed hook. Recreate the managed hook deliberately when adopting a
+new policy.
+
+See [examples/policy.json](examples/policy.json) for a copyable manifest.
+
 ## What this actually guarantees
 
 The deterministic guard itself uses **zero LLM tokens**. It does not guarantee zero
