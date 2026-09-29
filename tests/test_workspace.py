@@ -55,7 +55,7 @@ class WorkspaceGuardTests(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
 
     def test_workspace_sees_unstaged_tracked_changes(self):
-        (self.repo / "base.txt").write_text("base\nextra\n")
+        (self.repo / "base.txt").write_text("changed\nextra\n")
         self.blocked(
             self.cli("workspace", "--max-lines", "1"),
             "2 added/deleted lines",
