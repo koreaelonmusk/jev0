@@ -58,7 +58,7 @@ class WorkspaceGuardTests(unittest.TestCase):
         (self.repo / "base.txt").write_text("changed\nextra\n")
         self.blocked(
             self.cli("workspace", "--max-lines", "1"),
-            "2 added/deleted lines",
+            "3 added/deleted lines",
         )
         self.assertEqual(self.cli("staged", "--max-lines", "1").returncode, 0)
 
