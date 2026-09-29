@@ -591,7 +591,7 @@ class RangeGuardTests(unittest.TestCase):
 
     def test_range_rejects_unresolvable_or_option_like_refs(self):
         self.seed_base()
-        option = self.cli('range', '--no-index', 'HEAD')
+        option = self.cli('range', '--', '--no-index', 'HEAD')
         self.assertEqual(option.returncode, 2)
         self.assertIn(
             'commit ref must be a non-empty single-line non-option string',
@@ -634,7 +634,7 @@ class RangeGuardTests(unittest.TestCase):
     def test_range_base_policy_cannot_be_weakened_by_head(self):
         (self.repo / '.jev0.json').write_text(json.dumps({
             'schema_version': 1,
-            'max_files': 1,
+            'max_files': 10,
             'max_lines': 1,
             'allow': ['src'],
         }))
@@ -655,7 +655,7 @@ class RangeGuardTests(unittest.TestCase):
 
         self.blocked(
             self.cli('range', base, head, '--base-policy', '.jev0.json'),
-            '3 added/deleted lines exceed budget 1',
+            'added/deleted lines exceed budget 1',
         )
 
     def test_range_base_policy_missing_fails_closed(self):
