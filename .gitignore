@@ -1,0 +1,11 @@
+# Local model weights and caches
+*.gguf
+*.bin
+models/
+.cache/
+# Runtime and OS files
+.DS_Store
+*.log
+__pycache__/
+*.py[cod]
+.venv/
