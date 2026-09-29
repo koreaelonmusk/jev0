@@ -240,6 +240,120 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(existing.read_text(), 'keep')
 
 
+class PolicyTests(unittest.TestCase):
+    setUp = GuardTests.setUp
+    git = GuardTests.git
+    cli = GuardTests.cli
+    stage = GuardTests.stage
+    blocked = GuardTests.blocked
+
+    def write_policy(self, document, name='.jev0.json'):
+        path = self.repo / name
+        path.write_text(json.dumps(document))
+        return path
+
+    def test_policy_applies_line_budget(self):
+        self.write_policy({'schema_version': 1, 'max_lines': 1})
+        self.stage('a', b'a\nb\n')
+        self.blocked(self.cli('staged', '--policy', '.jev0.json'), '2 added/deleted')
+
+    def test_policy_is_never_auto_discovered(self):
+        self.write_policy({'schema_version': 1, 'max_lines': 1})
+        self.stage('a', b'a\nb\n')
+        result = self.cli('staged')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_policy_applies_scope_and_file_budget(self):
+        self.write_policy({
+            'schema_version': 1,
+            'max_files': 1,
+            'allow': ['src'],
+        })
+        self.stage('src/a')
+        self.stage('src/b')
+        self.blocked(self.cli('staged', '--policy', '.jev0.json'), '2 staged files')
+        self.git('reset', '-q')
+        self.stage('outside/a')
+        self.blocked(self.cli('staged', '--policy', '.jev0.json'), 'outside allowed scope')
+
+    def test_policy_rejects_unknown_or_executable_keys(self):
+        cases = [
+            ({'schema_version': 1, 'unknown': 1}, 'unknown policy keys'),
+            ({'schema_version': 1, 'evaluator_command': ['sh']}, 'unknown policy keys'),
+            ({'schema_version': 2}, 'unsupported policy schema_version'),
+            ({'schema_version': True}, 'schema_version must be an integer'),
+            ({'schema_version': 1, 'max_files': True}, 'max_files must be a positive integer'),
+            ({'schema_version': 1, 'allow': 'src'}, 'allow must be an array'),
+            ({'schema_version': 1, 'allow': ['../src']}, 'invalid policy scope'),
+        ]
+        for document, reason in cases:
+            with self.subTest(document=document):
+                self.write_policy(document)
+                self.blocked(self.cli('staged', '--policy', '.jev0.json'), reason)
+
+    def test_policy_cannot_escape_repository_through_symlink(self):
+        with tempfile.TemporaryDirectory() as outside:
+            target = Path(outside) / 'policy.json'
+            target.write_text(json.dumps({'schema_version': 1}))
+            (self.repo / '.jev0.json').symlink_to(target)
+            self.blocked(
+                self.cli('staged', '--policy', '.jev0.json'),
+                'policy must be an existing file inside the repository',
+            )
+
+    def test_policy_size_is_bounded_before_json_parse(self):
+        (self.repo / '.jev0.json').write_bytes(b' ' * 65537)
+        self.blocked(
+            self.cli('staged', '--policy', '.jev0.json'),
+            'policy exceeds 65536 bytes',
+        )
+
+    def test_policy_and_layer_zero_flags_cannot_be_mixed(self):
+        self.write_policy({'schema_version': 1})
+        cases = [
+            ('--max-files', '1'),
+            ('--max-lines', '1'),
+            ('--allow', 'src'),
+        ]
+        for option in cases:
+            with self.subTest(option=option):
+                result = self.cli('staged', '--policy', '.jev0.json', *option)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn('--policy cannot be combined', result.stderr)
+
+    def test_init_snapshots_policy_into_hook(self):
+        policy = self.write_policy({
+            'schema_version': 1,
+            'max_files': 1,
+            'max_lines': 50,
+            'allow': ['src'],
+        })
+        result = self.cli('init', '--policy', '.jev0.json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        hook = (self.repo / '.git/hooks/pre-commit').read_text()
+        self.assertIn('--max-files 1', hook)
+        self.assertIn('--max-lines 50', hook)
+        self.assertIn('--allow src', hook)
+        self.assertNotIn('--policy', hook)
+
+        policy.write_text(json.dumps({
+            'schema_version': 1,
+            'max_files': 100,
+            'max_lines': 5000,
+        }))
+        self.stage('src/a')
+        self.stage('src/b')
+        commit = subprocess.run(
+            ['git', 'commit', '-qm', 'blocked'],
+            cwd=self.repo,
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(commit.returncode, 0)
+        self.assertIn('2 staged files exceed budget 1', commit.stderr)
+
+
 class DoctorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
