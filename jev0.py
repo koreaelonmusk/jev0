@@ -835,6 +835,36 @@ def has_head():
     return result.returncode == 0
 
 
+def resolve_commit(ref):
+    """Resolve an explicit ref to a commit SHA without treating it as an option."""
+
+    if not isinstance(ref, str) or not ref or "\0" in ref or "\n" in ref or "\r" in ref:
+        raise Blocked("commit ref must be a non-empty single-line string")
+    result = subprocess.run(
+        [
+            "git",
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            ref + "^{commit}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode:
+        raise Blocked(f"cannot resolve commit ref: {ref!r}")
+    sha = result.stdout.decode("ascii", errors="strict").strip()
+    if not sha or any(ch not in "0123456789abcdefABCDEF" for ch in sha):
+        raise Blocked(f"Git returned an invalid commit id for {ref!r}")
+    return sha.lower()
+
+
+def range_diff_prefix(base_sha, head_sha):
+    return ["diff", f"{base_sha}...{head_sha}"]
+
+
 def diff_prefix(mode):
     if mode == "staged":
         return ["diff", "--cached"]
@@ -847,9 +877,9 @@ def mode_label(mode):
     return "staged" if mode == "staged" else "workspace"
 
 
-def unified_diff(mode, max_bytes=None):
+def unified_diff_prefix(prefix, max_bytes=None):
     args = (
-        *diff_prefix(mode),
+        *prefix,
         "--no-ext-diff",
         "--no-textconv",
         "--no-renames",
@@ -859,6 +889,10 @@ def unified_diff(mode, max_bytes=None):
     )
     output = git(*args) if max_bytes is None else git_limited(max_bytes, *args)
     return output.decode("utf-8", errors="replace")
+
+
+def unified_diff(mode, max_bytes=None):
+    return unified_diff_prefix(diff_prefix(mode), max_bytes)
 
 
 def evaluator_diff(mode, evaluator):
@@ -900,21 +934,7 @@ def workspace(args, evaluator: Optional[GuardEvaluator] = None):
         run_evaluator(evaluator, evaluator_diff("workspace", evaluator))
 
 
-def heuristic_rules(args, mode):
-    repository_root()
-    if mode == "workspace":
-        untracked = [
-            field
-            for field in git("ls-files", "--others", "--exclude-standard", "-z", "--").split(
-                b"\0"
-            )
-            if field
-        ]
-        if untracked:
-            path = os.fsdecode(untracked[0])
-            raise Blocked(f"untracked file requires staging/review: {path!r}")
-
-    prefix = diff_prefix(mode)
+def heuristic_rules_for_prefix(args, label, prefix):
     fields = git(
         *prefix,
         "--no-ext-diff",
@@ -925,7 +945,6 @@ def heuristic_rules(args, mode):
         "--",
     ).split(b"\0")
     entries = [field.split(b"\t", 2) for field in fields if field]
-    label = mode_label(mode)
     if len(entries) > args.max_files:
         raise Blocked(f"{len(entries)} {label} files exceed budget {args.max_files}")
 
@@ -961,6 +980,37 @@ def heuristic_rules(args, mode):
         raise Blocked(
             f"{total} added/deleted lines exceed budget {args.max_lines}"
         )
+
+
+def heuristic_rules(args, mode):
+    repository_root()
+    if mode == "workspace":
+        untracked = [
+            field
+            for field in git("ls-files", "--others", "--exclude-standard", "-z", "--").split(
+                b"\0"
+            )
+            if field
+        ]
+        if untracked:
+            path = os.fsdecode(untracked[0])
+            raise Blocked(f"untracked file requires staging/review: {path!r}")
+    heuristic_rules_for_prefix(args, mode_label(mode), diff_prefix(mode))
+
+
+def range_guard(args, evaluator: Optional[GuardEvaluator] = None):
+    settings, _, _ = resolve_guard_settings(args)
+    base_sha = resolve_commit(args.base)
+    head_sha = resolve_commit(args.head)
+    prefix = range_diff_prefix(base_sha, head_sha)
+    heuristic_rules_for_prefix(settings, "range", prefix)
+    if evaluator is not None:
+        max_bytes = (
+            evaluator.max_diff_bytes
+            if isinstance(evaluator, ProcessEvaluator)
+            else None
+        )
+        run_evaluator(evaluator, unified_diff_prefix(prefix, max_bytes))
 
 
 def ensure_managed_hook(hook, content):
@@ -1123,6 +1173,10 @@ def main():
     sub = parser.add_subparsers(dest="action", required=True)
     for name in ("staged", "workspace", "init"):
         add_guard_arguments(sub.add_parser(name))
+    item = sub.add_parser("range")
+    item.add_argument("base")
+    item.add_argument("head")
+    add_guard_arguments(item)
     item = sub.add_parser("run")
     item.add_argument("--timeout", type=duration, required=True)
     item.add_argument("command", nargs=argparse.REMAINDER)
@@ -1135,15 +1189,17 @@ def main():
     item.add_argument("path", type=policy_argument)
     item.add_argument("--json", action="store_true")
     args = parser.parse_args()
-    if args.action in ("staged", "workspace", "init") and args.policy is not None:
+    if args.action in ("staged", "workspace", "init", "range") and args.policy is not None:
         if args.max_files is not None or args.max_lines is not None or args.allow:
             parser.error("--policy cannot be combined with --max-files, --max-lines, or --allow")
     try:
-        if args.action in ("staged", "workspace"):
+        if args.action in ("staged", "workspace", "range"):
             evaluator = build_evaluator(args)
-            return {"staged": staged, "workspace": workspace}[args.action](
-                args, evaluator
-            ) or 0
+            return {
+                "staged": staged,
+                "workspace": workspace,
+                "range": range_guard,
+            }[args.action](args, evaluator) or 0
         return {
             "init": init,
             "run": run,
