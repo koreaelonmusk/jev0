@@ -679,23 +679,35 @@ def load_policy_from_commit(commit_sha, path):
 
     tree_path = policy_tree_path(path)
     object_spec = f"{commit_sha}:{tree_path}"
-    process = subprocess.Popen(
-        ["git", "show", "--no-ext-diff", "--no-textconv", object_spec],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-    )
-    try:
-        output, error = process.communicate(timeout=5)
-    except subprocess.TimeoutExpired:
-        terminate_process_group(process)
-        raise Blocked("base policy read timed out") from None
-    if process.returncode:
-        detail = error[:GIT_ERROR_BYTES].decode(errors="replace").strip()
-        suffix = ": " + detail if detail else ""
-        raise Blocked(f"cannot read base policy {tree_path!r}{suffix}")
-    if len(output) > POLICY_MAX_BYTES:
-        raise Blocked(f"policy exceeds {POLICY_MAX_BYTES} bytes")
+    with tempfile.TemporaryFile() as error_stream:
+        process = subprocess.Popen(
+            ["git", "show", "--no-ext-diff", "--no-textconv", object_spec],
+            stdout=subprocess.PIPE,
+            stderr=error_stream,
+            start_new_session=True,
+        )
+        try:
+            output = process.stdout.read(POLICY_MAX_BYTES + 1)
+            if len(output) > POLICY_MAX_BYTES:
+                terminate_process_group(process)
+                raise Blocked(f"policy exceeds {POLICY_MAX_BYTES} bytes")
+            returncode = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            terminate_process_group(process)
+            raise Blocked("base policy read timed out") from None
+        except KeyboardInterrupt:
+            terminate_process_group(process)
+            raise Blocked("base policy read interrupted") from None
+        finally:
+            if process.stdout is not None and not process.stdout.closed:
+                process.stdout.close()
+
+        if returncode:
+            error_stream.seek(0)
+            detail = error_stream.read(GIT_ERROR_BYTES).decode(errors="replace").strip()
+            suffix = ": " + detail if detail else ""
+            raise Blocked(f"cannot read base policy {tree_path!r}{suffix}")
+
     return parse_policy_document(output), tree_path, hashlib.sha256(output).hexdigest()
 
 
