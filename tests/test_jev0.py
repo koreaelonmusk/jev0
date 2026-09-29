@@ -314,6 +314,25 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(data['hook_status'], 'oversized')
         self.assertFalse(data['hook_enforced'])
 
+    def test_doctor_survives_oversized_hook_target(self):
+        self.assertEqual(self.cli('init').returncode, 0)
+        hook = self.repo / '.git/hooks/pre-commit'
+        target = self.repo / 'huge-jev0'
+        with target.open('wb') as stream:
+            stream.seek(10_000_000)
+            stream.write(b'x')
+        lines = hook.read_text().splitlines()
+        command = shlex.split(next(line for line in lines if line.startswith('exec ')))
+        command[2] = str(target)
+        hook.write_text('\n'.join(lines[:2] + ['exec ' + shlex.join(command[1:])]) + '\n')
+        hook.chmod(0o755)
+        result = self.cli('doctor', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data['hook_target_exists'])
+        self.assertFalse(data['hook_matches_executable'])
+        self.assertTrue(data['hook_enforced'])
+
 
     def test_doctor_reports_custom_hooks_path_without_mutation(self):
         subprocess.run(['git', 'config', 'core.hooksPath', '.hooks'],
