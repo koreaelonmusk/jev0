@@ -591,12 +591,16 @@ class RangeGuardTests(unittest.TestCase):
 
     def test_range_rejects_unresolvable_or_option_like_refs(self):
         self.seed_base()
-        for ref in ('--no-index', 'definitely-missing-ref'):
-            with self.subTest(ref=ref):
-                self.blocked(
-                    self.cli('range', ref, 'HEAD'),
-                    'cannot resolve commit ref',
-                )
+        option = self.cli('range', '--no-index', 'HEAD')
+        self.assertEqual(option.returncode, 2)
+        self.assertIn(
+            'commit ref must be a non-empty single-line non-option string',
+            option.stderr,
+        )
+        self.blocked(
+            self.cli('range', 'definitely-missing-ref', 'HEAD'),
+            'cannot resolve commit ref',
+        )
 
     def test_range_applies_explicit_policy(self):
         base = self.seed_base()
