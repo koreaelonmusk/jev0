@@ -40,6 +40,8 @@ class ProcessEvaluator:
         self.max_output_bytes = max_output_bytes
 
     def evaluate(self, diff_text: str) -> tuple[bool, str]:
+        if os.name != "posix":
+            raise Blocked("Layer 1 process evaluators currently require macOS or Linux")
         payload = diff_text.encode("utf-8")
         if len(payload) > self.max_diff_bytes:
             raise Blocked(f"Layer 1 diff exceeds {self.max_diff_bytes} bytes")
