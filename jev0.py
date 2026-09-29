@@ -840,7 +840,7 @@ def ensure_managed_hook(hook, content):
 
 
 def init(args):
-    settings, policy_file, root = resolve_guard_settings(args)
+    settings, _, root = resolve_guard_settings(args)
     custom = subprocess.run(
         ["git", "config", "--get", "core.hooksPath"],
         stdout=subprocess.PIPE,
@@ -860,20 +860,13 @@ def init(args):
         sys.executable,
         str(Path(__file__).resolve()),
         "staged",
+        "--max-files",
+        str(settings.max_files),
+        "--max-lines",
+        str(settings.max_lines),
     ]
-    if policy_file is not None:
-        command.extend(["--policy", str(policy_file)])
-    else:
-        command.extend(
-            [
-                "--max-files",
-                str(settings.max_files),
-                "--max-lines",
-                str(settings.max_lines),
-            ]
-        )
-        for allowed in settings.allow:
-            command.extend(["--allow", allowed])
+    for allowed in settings.allow:
+        command.extend(["--allow", allowed])
     if args.evaluator_command:
         command.extend(
             [
