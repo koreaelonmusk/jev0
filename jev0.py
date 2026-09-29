@@ -90,14 +90,15 @@ def close_process_pipes(process):
 def terminate_process_group(process, cleanup_timeout=PROCESS_CLEANUP_TIMEOUT):
     """Best-effort process-group kill with bounded local cleanup."""
 
-    if process.poll() is None:
-        try:
-            if os.name == "posix":
-                os.killpg(process.pid, signal.SIGKILL)
-            else:
-                process.kill()
-        except (ProcessLookupError, PermissionError):
-            pass
+    try:
+        if os.name == "posix":
+            # The leader may already have exited while descendants still keep the
+            # process group (and inherited pipes) alive.
+            os.killpg(process.pid, signal.SIGKILL)
+        elif process.poll() is None:
+            process.kill()
+    except (ProcessLookupError, PermissionError):
+        pass
     close_process_pipes(process)
     try:
         process.wait(timeout=cleanup_timeout)
