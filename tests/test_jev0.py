@@ -636,7 +636,7 @@ class RangeGuardTests(unittest.TestCase):
             'schema_version': 1,
             'max_files': 10,
             'max_lines': 1,
-            'allow': ['src'],
+            'allow': ['src', '.jev0.json'],
         }))
         self.git('add', '.jev0.json')
         self.git('commit', '-qm', 'trusted policy')
