@@ -347,6 +347,37 @@ class ProcessEvaluatorTests(unittest.TestCase):
         self.blocked(result, 'evaluator exceeded 0.2s')
         self.assertLess(elapsed, 1.5, f'evaluator cleanup took {elapsed:.2f}s')
 
+    def test_success_does_not_wait_for_detached_child_holding_output_fd(self):
+        self.stage('src/a')
+        code = (
+            'import json,subprocess,sys,time; '
+            'subprocess.Popen([sys.executable,"-c","import time; time.sleep(2)"], '
+            'start_new_session=True); '
+            'print(json.dumps({"passed":True,"reason":""}))'
+        )
+        started = time.monotonic()
+        result = self.cli('staged', '--evaluator-command', self.command(code),
+                          '--evaluator-timeout', '1')
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(elapsed, 1.5, f'evaluator completion took {elapsed:.2f}s')
+
+    def test_large_stdout_is_rejected_without_returning_it(self):
+        self.stage('src/a')
+        code = 'import sys; sys.stdout.write("x"*1000000)'
+        result = self.cli('staged', '--evaluator-command', self.command(code),
+                          '--max-evaluator-output-bytes', '128')
+        self.blocked(result, 'output exceeds 128 bytes')
+        self.assertEqual(result.stdout, '')
+
+    def test_large_stderr_is_truncated_on_nonzero_exit(self):
+        self.stage('src/a')
+        code = 'import sys; sys.stderr.write("e"*1000000); sys.exit(7)'
+        result = self.cli('staged', '--evaluator-command', self.command(code),
+                          '--max-evaluator-output-bytes', '128')
+        self.blocked(result, 'evaluator exited 7')
+        self.assertLess(len(result.stderr), 300)
+
     def test_keyboard_interrupt_cleans_evaluator(self):
         import jev0
         from unittest.mock import Mock, patch
