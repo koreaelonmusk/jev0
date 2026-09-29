@@ -1195,14 +1195,22 @@ def evidence_verify(args):
         raise Blocked("evidence decision must be allow or block")
     if evidence["reason"] is not None and not isinstance(evidence["reason"], str):
         raise Blocked("evidence reason must be null or a string")
-    for key in ("base_sha", "head_sha", "merge_base_sha", "verifier_sha256", "evidence_sha256"):
+    for key in ("base_sha", "head_sha", "merge_base_sha"):
+        value = evidence[key]
+        if (
+            not isinstance(value, str)
+            or len(value) not in (40, 64)
+            or any(ch not in "0123456789abcdef" for ch in value)
+        ):
+            raise Blocked(f"evidence {key} must be a lowercase Git object id")
+    for key in ("verifier_sha256", "evidence_sha256"):
         value = evidence[key]
         if (
             not isinstance(value, str)
             or len(value) != 64
             or any(ch not in "0123456789abcdef" for ch in value)
         ):
-            raise Blocked(f"evidence {key} must be a lowercase SHA-256/commit hex string")
+            raise Blocked(f"evidence {key} must be a lowercase SHA-256")
 
     policy = evidence["policy"]
     if not isinstance(policy, dict) or set(policy) != {"max_files", "max_lines", "allow"}:
