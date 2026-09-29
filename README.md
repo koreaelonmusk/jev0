@@ -102,7 +102,8 @@ See [docs/UNIVERSAL.md](docs/UNIVERSAL.md) for the vendor-neutral integration co
 
 ## Doctor
 
-`jev0 doctor` is read-only. It reports the exact executable path and SHA-256,
+`jev0 doctor` is read-only. Its JSON output includes `schema_version` for machine
+consumers. It reports the exact executable path and SHA-256,
 Python/Git/platform information, whether the current directory is in a Git
 repository, and whether a jev0-managed pre-commit hook is actually executable.
 
