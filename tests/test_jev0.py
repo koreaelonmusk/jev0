@@ -815,6 +815,25 @@ class RangeEvidenceTests(unittest.TestCase):
             hashlib.sha256(raw).hexdigest(),
         )
 
+    def test_range_report_binds_verifier_identity_and_evidence_digest(self):
+        base = self.commit_file('base.txt', b'base\n', 'base')
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        result = self.cli('range-report', base, head)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+
+        self.assertEqual(data['verifier_version'].split('-')[0], '0.3.0')
+        self.assertEqual(
+            data['verifier_sha256'],
+            hashlib.sha256(CLI.read_bytes()).hexdigest(),
+        )
+
+        digest = data.pop('evidence_sha256')
+        canonical = json.dumps(
+            data, sort_keys=True, separators=(',', ':'), ensure_ascii=False
+        ).encode('utf-8')
+        self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
+
     def test_range_report_and_range_share_decision(self):
         base = self.commit_file('base.txt', b'base\n', 'base')
         head = self.commit_file('src/a.py', b'a\nb\n', 'head')
