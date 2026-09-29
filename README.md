@@ -25,7 +25,7 @@ jev0 init
 those cases. Run `init` again with the same arguments safely. No shell profiles,
 agent instructions, or global Git settings are edited.
 
-## Six commands
+## Core commands
 
 ```sh
 # Check all tracked changes against HEAD, including unstaged edits.
@@ -250,6 +250,25 @@ Range metadata is resource-bounded before parsing: jev0 reads at most 8 MiB
 from each Git metadata stream. Evidence JSON includes at most 1000 changed paths
 while preserving `paths_total` and `paths_truncated`, so extremely large change
 sets cannot force unbounded report growth.
+
+### Verify persisted evidence
+
+Persisted evidence can be checked later without recomputing the Git diff:
+
+```sh
+jev0 evidence-verify evidence.json
+jev0 evidence-verify evidence.json --json
+jev0 evidence-verify evidence.json --require-current-verifier
+```
+
+The verifier accepts at most 1 MiB of UTF-8 JSON, enforces the evidence schema,
+recomputes the canonical `evidence_sha256`, validates path/count invariants, and
+reports whether the recorded verifier SHA-256 matches the currently running
+`jev0.py`. `--require-current-verifier` turns a verifier mismatch into exit 1.
+
+This verifies deterministic integrity, not authorship. A valid digest proves only
+that the evidence document is internally self-consistent; provenance still
+depends on where the evidence was produced and how that CI boundary is protected.
 
 ## Universal workflow
 
