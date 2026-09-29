@@ -19,6 +19,9 @@ from typing import Optional, Protocol
 VERSION = "0.3.0-dev"
 PROCESS_CLEANUP_TIMEOUT = 1.0
 GIT_ERROR_BYTES = 8192
+DOCTOR_SCHEMA_VERSION = 1
+DOCTOR_MAX_FILE_BYTES = 10_000_000
+DOCTOR_HOOK_PREFIX_BYTES = 16_384
 
 
 class Blocked(Exception):
@@ -232,9 +235,12 @@ def git_limited(max_bytes, *args):
         return output
 
 
-def file_sha256(path):
+def file_sha256(path, max_bytes=None):
+    path = Path(path)
+    if max_bytes is not None and path.stat().st_size > max_bytes:
+        raise Blocked(f"diagnostic file exceeds {max_bytes} bytes")
     digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
+    with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -372,7 +378,21 @@ def doctor_repository_state():
         }
 
     try:
-        first_lines = hook.read_text(errors="replace").splitlines()[:2]
+        with hook.open("rb") as stream:
+            hook_prefix = stream.read(DOCTOR_HOOK_PREFIX_BYTES + 1)
+        if len(hook_prefix) > DOCTOR_HOOK_PREFIX_BYTES:
+            return {
+                "repository": True,
+                "repository_root": root,
+                "hook_status": "oversized",
+                "hook_enforced": False,
+                "hook_python": None,
+                "hook_target": None,
+                "hook_target_exists": False,
+                "hook_matches_executable": False,
+            }
+        hook_text = hook_prefix.decode(errors="replace")
+        first_lines = hook_text.splitlines()[:2]
     except OSError:
         return {
             "repository": True,
@@ -404,7 +424,7 @@ def doctor_repository_state():
         return state
 
     try:
-        lines = hook.read_text(errors="replace").splitlines()
+        lines = hook_text.splitlines()
         command_line = next(
             line for line in lines if line.startswith("exec ")
         )
@@ -427,7 +447,7 @@ def doctor_repository_state():
     if target_exists:
         try:
             state["hook_matches_executable"] = (
-                file_sha256(hook_target) == executable_sha256()
+                file_sha256(hook_target, DOCTOR_MAX_FILE_BYTES) == executable_sha256()
             )
         except OSError:
             state["hook_matches_executable"] = False
@@ -439,6 +459,7 @@ def doctor_repository_state():
 
 def doctor(args):
     state = {
+        "schema_version": DOCTOR_SCHEMA_VERSION,
         "version": VERSION,
         "executable": str(Path(__file__).resolve()),
         "executable_sha256": executable_sha256(),
@@ -460,6 +481,7 @@ def doctor(args):
         print(json.dumps(state, sort_keys=True, separators=(",", ":")))
     else:
         ordered = (
+            "schema_version",
             "version",
             "executable",
             "executable_sha256",
