@@ -34,3 +34,4 @@ jobs:
         run: |
           python3 jev0.py --version
           python3 jev0.py workspace
+          python3 jev0.py doctor --json
