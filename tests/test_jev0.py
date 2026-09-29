@@ -962,15 +962,54 @@ class EvidenceVerifyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn('evidence exceeds 1048576 bytes', result.stderr)
 
-    def test_evidence_verify_detects_different_but_valid_verifier(self):
-        path, evidence = self.make_evidence()
-        evidence['verifier_sha256'] = '0' * 64
+    def resign_evidence(self, evidence):
         unsigned = dict(evidence)
-        unsigned.pop('evidence_sha256')
+        unsigned.pop('evidence_sha256', None)
         canonical = json.dumps(
             unsigned, sort_keys=True, separators=(',', ':'), ensure_ascii=False
         ).encode('utf-8')
         evidence['evidence_sha256'] = hashlib.sha256(canonical).hexdigest()
+        return evidence
+
+    def test_evidence_verify_rejects_semantically_impossible_allow_reason(self):
+        path, evidence = self.make_evidence()
+        evidence['reason'] = 'should not exist'
+        path.write_text(json.dumps(self.resign_evidence(evidence)))
+        result = self.cli('evidence-verify', str(path))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            'allow evidence must not contain a block reason',
+            result.stderr,
+        )
+
+    def test_evidence_verify_rejects_inconsistent_change_counts(self):
+        path, evidence = self.make_evidence()
+        evidence['files_changed'] = evidence['paths_total'] + 1
+        path.write_text(json.dumps(self.resign_evidence(evidence)))
+        result = self.cli('evidence-verify', str(path))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            'files_changed must equal paths_total',
+            result.stderr,
+        )
+
+    def test_evidence_verify_rejects_invalid_policy_provenance(self):
+        path, evidence = self.make_evidence()
+        evidence['policy_source'] = 'flags'
+        evidence['policy_path'] = '.jev0.json'
+        evidence['policy_sha256'] = '1' * 64
+        path.write_text(json.dumps(self.resign_evidence(evidence)))
+        result = self.cli('evidence-verify', str(path))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            'flag policy evidence must not contain policy file provenance',
+            result.stderr,
+        )
+
+    def test_evidence_verify_detects_different_but_valid_verifier(self):
+        path, evidence = self.make_evidence()
+        evidence['verifier_sha256'] = '0' * 64
+        self.resign_evidence(evidence)
         path.write_text(json.dumps(evidence))
 
         relaxed = self.cli('evidence-verify', str(path), '--json')
