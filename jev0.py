@@ -25,6 +25,7 @@ DOCTOR_HOOK_PREFIX_BYTES = 16_384
 POLICY_SCHEMA_VERSION = 1
 POLICY_MAX_BYTES = 65_536
 EVIDENCE_SCHEMA_VERSION = 1
+EVIDENCE_MAX_BYTES = 1_048_576
 CHANGE_METADATA_MAX_BYTES = 8_388_608
 EVIDENCE_MAX_PATHS = 1000
 DEFAULT_MAX_FILES = 20
@@ -1133,6 +1134,134 @@ def heuristic_rules(args, mode):
     heuristic_rules_for_prefix(args, mode_label(mode), diff_prefix(mode))
 
 
+def read_evidence(path):
+    candidate = Path(path)
+    try:
+        with candidate.open("rb") as stream:
+            raw = stream.read(EVIDENCE_MAX_BYTES + 1)
+    except OSError as error:
+        raise Blocked("cannot read evidence: " + str(error)) from None
+    if len(raw) > EVIDENCE_MAX_BYTES:
+        raise Blocked(f"evidence exceeds {EVIDENCE_MAX_BYTES} bytes")
+
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise Blocked("evidence must be valid UTF-8 JSON") from None
+    if not isinstance(document, dict):
+        raise Blocked("evidence root must be a JSON object")
+    return document
+
+
+def evidence_verify(args):
+    evidence = read_evidence(args.path)
+    required = {
+        "schema_version",
+        "decision",
+        "reason",
+        "base_sha",
+        "head_sha",
+        "merge_base_sha",
+        "policy_source",
+        "policy_path",
+        "policy_sha256",
+        "policy",
+        "verifier_version",
+        "verifier_sha256",
+        "files_changed",
+        "lines_changed",
+        "paths",
+        "paths_truncated",
+        "paths_total",
+        "evidence_sha256",
+    }
+    if set(evidence) != required:
+        missing = sorted(required - set(evidence))
+        extra = sorted(set(evidence) - required)
+        detail = []
+        if missing:
+            detail.append("missing=" + ",".join(missing))
+        if extra:
+            detail.append("extra=" + ",".join(extra))
+        raise Blocked("evidence keys mismatch" + (": " + " ".join(detail) if detail else ""))
+
+    if type(evidence["schema_version"]) is not int:
+        raise Blocked("evidence schema_version must be an integer")
+    if evidence["schema_version"] != EVIDENCE_SCHEMA_VERSION:
+        raise Blocked(
+            f"unsupported evidence schema_version {evidence['schema_version']}"
+        )
+    if evidence["decision"] not in ("allow", "block"):
+        raise Blocked("evidence decision must be allow or block")
+    if evidence["reason"] is not None and not isinstance(evidence["reason"], str):
+        raise Blocked("evidence reason must be null or a string")
+    for key in ("base_sha", "head_sha", "merge_base_sha", "verifier_sha256", "evidence_sha256"):
+        value = evidence[key]
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(ch not in "0123456789abcdef" for ch in value)
+        ):
+            raise Blocked(f"evidence {key} must be a lowercase SHA-256/commit hex string")
+
+    policy = evidence["policy"]
+    if not isinstance(policy, dict) or set(policy) != {"max_files", "max_lines", "allow"}:
+        raise Blocked("evidence policy shape is invalid")
+    if type(policy["max_files"]) is not int or policy["max_files"] <= 0:
+        raise Blocked("evidence policy max_files must be a positive integer")
+    if type(policy["max_lines"]) is not int or policy["max_lines"] <= 0:
+        raise Blocked("evidence policy max_lines must be a positive integer")
+    if not isinstance(policy["allow"], list) or any(not isinstance(x, str) for x in policy["allow"]):
+        raise Blocked("evidence policy allow must be an array of strings")
+
+    if type(evidence["files_changed"]) is not int or evidence["files_changed"] < 0:
+        raise Blocked("evidence files_changed must be a non-negative integer")
+    if type(evidence["lines_changed"]) is not int or evidence["lines_changed"] < 0:
+        raise Blocked("evidence lines_changed must be a non-negative integer")
+    if type(evidence["paths_total"]) is not int or evidence["paths_total"] < 0:
+        raise Blocked("evidence paths_total must be a non-negative integer")
+    if type(evidence["paths_truncated"]) is not bool:
+        raise Blocked("evidence paths_truncated must be a boolean")
+    if not isinstance(evidence["paths"], list) or any(not isinstance(x, str) for x in evidence["paths"]):
+        raise Blocked("evidence paths must be an array of strings")
+    if len(evidence["paths"]) > EVIDENCE_MAX_PATHS:
+        raise Blocked(f"evidence paths exceed {EVIDENCE_MAX_PATHS} entries")
+    if evidence["paths_total"] < len(evidence["paths"]):
+        raise Blocked("evidence paths_total cannot be smaller than paths length")
+    if evidence["paths_truncated"] != (evidence["paths_total"] > len(evidence["paths"])):
+        raise Blocked("evidence paths_truncated is inconsistent with paths_total")
+
+    supplied = evidence["evidence_sha256"]
+    unsigned = dict(evidence)
+    del unsigned["evidence_sha256"]
+    canonical = json.dumps(
+        unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    computed = hashlib.sha256(canonical).hexdigest()
+    if supplied != computed:
+        raise Blocked("evidence digest mismatch")
+
+    verifier_match = evidence["verifier_sha256"] == executable_sha256()
+    if args.require_current_verifier and not verifier_match:
+        raise Blocked("evidence verifier does not match current jev0")
+
+    result = {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "valid": True,
+        "evidence_sha256": supplied,
+        "verifier_sha256": evidence["verifier_sha256"],
+        "current_verifier_match": verifier_match,
+    }
+    if args.json:
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    else:
+        print("evidence: valid")
+        print(f"evidence_sha256: {supplied}")
+        print(f"verifier_sha256: {evidence['verifier_sha256']}")
+        print("current_verifier_match: " + ("yes" if verifier_match else "no"))
+    return 0
+
+
 def range_report(args):
     repository_root()
     base_sha = resolve_commit(args.base)
@@ -1407,6 +1536,10 @@ def main():
     item = sub.add_parser("policy-check")
     item.add_argument("path", type=policy_argument)
     item.add_argument("--json", action="store_true")
+    item = sub.add_parser("evidence-verify")
+    item.add_argument("path")
+    item.add_argument("--json", action="store_true")
+    item.add_argument("--require-current-verifier", action="store_true")
     args = parser.parse_args()
     if args.action in ("staged", "workspace", "init", "range", "range-report") and args.policy is not None:
         if args.max_files is not None or args.max_lines is not None or args.allow:
@@ -1435,6 +1568,7 @@ def main():
             "doctor": doctor,
             "policy": inspect_policy,
             "policy-check": policy_check,
+            "evidence-verify": evidence_verify,
             "range-report": range_report,
         }[args.action](args) or 0
     except (Blocked, OSError, ValueError) as error:
