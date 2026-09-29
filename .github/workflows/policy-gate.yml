@@ -1,0 +1,75 @@
+name: policy-gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jev0-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: jev0 policy gate
+    if: ${{ github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # SECURITY: checkout only the trusted base commit. Never checkout or execute PR head code.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Fetch PR head as Git data only
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git fetch --no-tags --depth=1 origin \
+            "refs/pull/${PR_NUMBER}/head:refs/remotes/jev0/pr-head"
+      - name: Verify trusted base policy
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          HEAD_SHA=$(git rev-parse refs/remotes/jev0/pr-head)
+          test "$HEAD_SHA" = "$EXPECTED_HEAD_SHA"
+
+          EVIDENCE="$RUNNER_TEMP/jev0-range-evidence.json"
+          set +e
+          python3 jev0.py range-report "$BASE_SHA" "$HEAD_SHA" \
+            --base-policy .github/jev0-policy.json > "$EVIDENCE"
+          STATUS=$?
+          set -e
+
+          # Keep the canonical compact JSON in the trusted workflow log.
+          cat "$EVIDENCE"
+
+          # Render only bounded headline fields in the human-facing summary.
+          python3 - "$EVIDENCE" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              data = json.load(stream)
+
+          print("### jev0 policy evidence")
+          print()
+          print(f"- decision: `{data['decision']}`")
+          print(f"- base: `{data['base_sha']}`")
+          print(f"- head: `{data['head_sha']}`")
+          print(f"- merge base: `{data['merge_base_sha']}`")
+          print(f"- policy sha256: `{data['policy_sha256']}`")
+          print(f"- changed files: {data['files_changed']}")
+          print(f"- added + deleted lines: {data['lines_changed']}")
+          if data["reason"]:
+              print(f"- reason: `{data['reason']}`")
+          PY
+
+          exit "$STATUS"
