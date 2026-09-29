@@ -1192,9 +1192,15 @@ def range_report(args):
             "max_lines": settings.max_lines,
             "allow": settings.allow,
         },
+        "verifier_version": VERSION,
+        "verifier_sha256": executable_sha256(),
         **stats,
     }
-    print(json.dumps(state, sort_keys=True, separators=(",", ":")))
+    canonical = json.dumps(
+        state, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    state["evidence_sha256"] = hashlib.sha256(canonical).hexdigest()
+    print(json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
     return 0 if decision == "allow" else 1
 
 
