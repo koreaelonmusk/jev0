@@ -48,3 +48,12 @@ Because this event can carry elevated trust, the workflow deliberately:
 Do not add build, test, package-install, shell-source, or other execution of
 pull-request head content to this workflow. Untrusted code belongs in the normal
 `pull_request` workflow with its restricted token.
+
+## Evidence digests
+
+Range evidence records the running jev0 source SHA-256 and a deterministic
+SHA-256 over the canonical evidence fields. These hashes support reproducibility,
+change detection, and audit correlation. They are not signatures, certificates,
+or proof of authorship. Treat evidence as authenticated only when it was produced
+inside a trusted CI boundary whose workflow, verifier, and policy come from the
+protected base commit.

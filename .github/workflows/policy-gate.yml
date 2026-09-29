@@ -66,6 +66,9 @@ jobs:
           print(f"- head: `{data['head_sha']}`")
           print(f"- merge base: `{data['merge_base_sha']}`")
           print(f"- policy sha256: `{data['policy_sha256']}`")
+          print(f"- verifier: `{data['verifier_version']}`")
+          print(f"- verifier sha256: `{data['verifier_sha256']}`")
+          print(f"- evidence sha256: `{data['evidence_sha256']}`")
           print(f"- changed files: {data['files_changed']}")
           print(f"- added + deleted lines: {data['lines_changed']}")
           if data["reason"]:
