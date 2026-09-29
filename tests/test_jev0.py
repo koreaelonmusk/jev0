@@ -324,6 +324,11 @@ class PolicyTests(unittest.TestCase):
             'policy must be valid UTF-8 JSON',
         )
 
+    def test_empty_policy_path_is_invalid_cli(self):
+        result = self.cli('staged', '--policy', '')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('policy path must not be empty', result.stderr)
+
     def test_policy_and_layer_zero_flags_cannot_be_mixed(self):
         self.write_policy({'schema_version': 1})
         cases = [
