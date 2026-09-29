@@ -25,6 +25,8 @@ DOCTOR_HOOK_PREFIX_BYTES = 16_384
 POLICY_SCHEMA_VERSION = 1
 POLICY_MAX_BYTES = 65_536
 EVIDENCE_SCHEMA_VERSION = 1
+CHANGE_METADATA_MAX_BYTES = 8_388_608
+EVIDENCE_MAX_PATHS = 1000
 DEFAULT_MAX_FILES = 20
 DEFAULT_MAX_LINES = 500
 
@@ -209,6 +211,35 @@ def git(*args):
             "Git operation failed: " + result.stderr.decode(errors="replace").strip()
         )
     return result.stdout
+
+
+def git_output_limited(max_bytes, label, *args):
+    """Capture Git stdout with a hard byte ceiling and bounded diagnostics."""
+
+    with tempfile.TemporaryFile() as error_stream:
+        process = subprocess.Popen(
+            ["git", *args],
+            stdout=subprocess.PIPE,
+            stderr=error_stream,
+            start_new_session=True,
+        )
+        try:
+            output = process.stdout.read(max_bytes + 1)
+            if len(output) > max_bytes:
+                terminate_process_group(process)
+                raise Blocked(f"{label} exceeds {max_bytes} bytes")
+            returncode = process.wait()
+        except KeyboardInterrupt:
+            terminate_process_group(process)
+            raise Blocked("Git operation interrupted") from None
+        finally:
+            if process.stdout is not None and not process.stdout.closed:
+                process.stdout.close()
+        if returncode:
+            error_stream.seek(0)
+            detail = error_stream.read(GIT_ERROR_BYTES).decode(errors="replace").strip()
+            raise Blocked("Git operation failed: " + detail)
+        return output
 
 
 def git_limited(max_bytes, *args):
@@ -1002,7 +1033,9 @@ def workspace(args, evaluator: Optional[GuardEvaluator] = None):
 
 
 def inspect_change_set(prefix):
-    fields = git(
+    fields = git_output_limited(
+        CHANGE_METADATA_MAX_BYTES,
+        "change metadata",
         *prefix,
         "--no-ext-diff",
         "--no-textconv",
@@ -1023,7 +1056,9 @@ def inspect_change_set(prefix):
         entries.append((added, removed, raw_path, path))
 
     active = set(
-        git(
+        git_output_limited(
+            CHANGE_METADATA_MAX_BYTES,
+            "active-path metadata",
             *prefix,
             "--no-ext-diff",
             "--no-renames",
@@ -1033,12 +1068,15 @@ def inspect_change_set(prefix):
             "--",
         ).split(b"\0")
     )
+    paths = [entry[3] for entry in entries]
     return {
         "entries": entries,
         "active": active,
         "files_changed": len(entries),
         "lines_changed": total,
-        "paths": [entry[3] for entry in entries],
+        "paths": paths[:EVIDENCE_MAX_PATHS],
+        "paths_truncated": len(paths) > EVIDENCE_MAX_PATHS,
+        "paths_total": len(paths),
     }
 
 
@@ -1069,6 +1107,8 @@ def enforce_change_set(args, label, analysis):
         "files_changed": analysis["files_changed"],
         "lines_changed": analysis["lines_changed"],
         "paths": analysis["paths"],
+        "paths_truncated": analysis["paths_truncated"],
+        "paths_total": analysis["paths_total"],
     }
 
 
@@ -1133,6 +1173,8 @@ def range_report(args):
             "files_changed": analysis["files_changed"],
             "lines_changed": analysis["lines_changed"],
             "paths": analysis["paths"],
+            "paths_truncated": analysis["paths_truncated"],
+            "paths_total": analysis["paths_total"],
         }
 
     state = {
