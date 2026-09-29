@@ -232,15 +232,18 @@ def git_limited(max_bytes, *args):
         return output
 
 
-def executable_sha256():
-    """Return the SHA-256 of the exact jev0 source/executable being run."""
-
-    path = Path(__file__).resolve()
+def file_sha256(path):
     digest = hashlib.sha256()
-    with path.open("rb") as stream:
+    with Path(path).open("rb") as stream:
         for chunk in iter(lambda: stream.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def executable_sha256():
+    """Return the SHA-256 of the exact jev0 source/executable being run."""
+
+    return file_sha256(Path(__file__).resolve())
 
 
 def git_version():
@@ -274,6 +277,10 @@ def doctor_repository_state():
             "repository_root": None,
             "hook_status": "git-unavailable",
             "hook_enforced": False,
+            "hook_python": None,
+            "hook_target": None,
+            "hook_target_exists": False,
+            "hook_matches_executable": False,
         }
 
     if root_result.returncode:
@@ -282,6 +289,10 @@ def doctor_repository_state():
             "repository_root": None,
             "hook_status": "not-a-repository",
             "hook_enforced": False,
+            "hook_python": None,
+            "hook_target": None,
+            "hook_target_exists": False,
+            "hook_matches_executable": False,
         }
 
     root = os.fsdecode(root_result.stdout.rstrip(b"\n"))
@@ -297,6 +308,10 @@ def doctor_repository_state():
             "repository_root": root,
             "hook_status": "custom-hooks-path",
             "hook_enforced": False,
+            "hook_python": None,
+            "hook_target": None,
+            "hook_target_exists": False,
+            "hook_matches_executable": False,
         }
     if custom.returncode != 1:
         return {
@@ -304,6 +319,10 @@ def doctor_repository_state():
             "repository_root": root,
             "hook_status": "git-config-error",
             "hook_enforced": False,
+            "hook_python": None,
+            "hook_target": None,
+            "hook_target_exists": False,
+            "hook_matches_executable": False,
         }
 
     hook_result = subprocess.run(
@@ -318,6 +337,10 @@ def doctor_repository_state():
             "repository_root": root,
             "hook_status": "git-path-error",
             "hook_enforced": False,
+            "hook_python": None,
+            "hook_target": None,
+            "hook_target_exists": False,
+            "hook_matches_executable": False,
         }
 
     hook = Path(os.fsdecode(hook_result.stdout.rstrip(b"\n")))
@@ -331,6 +354,10 @@ def doctor_repository_state():
             "repository_root": root,
             "hook_status": "symlink",
             "hook_enforced": False,
+            "hook_python": None,
+            "hook_target": None,
+            "hook_target_exists": False,
+            "hook_matches_executable": False,
         }
     if not hook.exists():
         return {
@@ -338,6 +365,10 @@ def doctor_repository_state():
             "repository_root": root,
             "hook_status": "missing",
             "hook_enforced": False,
+            "hook_python": None,
+            "hook_target": None,
+            "hook_target_exists": False,
+            "hook_matches_executable": False,
         }
 
     try:
@@ -348,23 +379,62 @@ def doctor_repository_state():
             "repository_root": root,
             "hook_status": "unreadable",
             "hook_enforced": False,
+            "hook_python": None,
+            "hook_target": None,
+            "hook_target_exists": False,
+            "hook_matches_executable": False,
         }
 
     managed = "# jev0 managed pre-commit hook" in first_lines
     executable = os.access(hook, os.X_OK)
-    if managed and executable:
-        status = "managed"
-    elif managed:
-        status = "managed-not-executable"
-    else:
-        status = "foreign"
-
-    return {
+    state = {
         "repository": True,
         "repository_root": root,
-        "hook_status": status,
-        "hook_enforced": managed and executable,
+        "hook_status": "foreign",
+        "hook_enforced": False,
+        "hook_python": None,
+        "hook_target": None,
+        "hook_target_exists": False,
+        "hook_matches_executable": False,
     }
+    if not managed:
+        return state
+    if not executable:
+        state["hook_status"] = "managed-not-executable"
+        return state
+
+    try:
+        lines = hook.read_text(errors="replace").splitlines()
+        command_line = next(
+            line for line in lines if line.startswith("exec ")
+        )
+        command = shlex.split(command_line)[1:]
+    except (OSError, StopIteration, ValueError):
+        state["hook_status"] = "managed-invalid"
+        return state
+
+    if len(command) < 3 or command[2] != "staged":
+        state["hook_status"] = "managed-invalid"
+        return state
+
+    hook_python = Path(command[0])
+    hook_target = Path(command[1])
+    target_exists = hook_target.is_file()
+    python_exists = hook_python.is_file()
+    state["hook_python"] = str(hook_python)
+    state["hook_target"] = str(hook_target)
+    state["hook_target_exists"] = target_exists
+    if target_exists:
+        try:
+            state["hook_matches_executable"] = (
+                file_sha256(hook_target) == executable_sha256()
+            )
+        except OSError:
+            state["hook_matches_executable"] = False
+
+    state["hook_enforced"] = python_exists and target_exists
+    state["hook_status"] = "managed" if state["hook_enforced"] else "managed-stale"
+    return state
 
 
 def doctor(args):
@@ -403,6 +473,10 @@ def doctor(args):
             "repository",
             "repository_root",
             "hook_status",
+            "hook_python",
+            "hook_target",
+            "hook_target_exists",
+            "hook_matches_executable",
             "hook_enforced",
         )
         for key in ordered:
