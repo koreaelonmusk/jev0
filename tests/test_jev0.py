@@ -332,6 +332,36 @@ class ProcessEvaluatorTests(unittest.TestCase):
         time.sleep(1.1)
         self.assertFalse((self.repo / 'escaped-evaluator').exists())
 
+    def test_timeout_does_not_wait_for_escaped_pipe_holder(self):
+        self.stage('src/a')
+        code = (
+            'import subprocess,sys,time; '
+            'subprocess.Popen([sys.executable,"-c","import time; time.sleep(2)"], '
+            'start_new_session=True); '
+            'time.sleep(20)'
+        )
+        started = time.monotonic()
+        result = self.cli('staged', '--evaluator-command', self.command(code),
+                          '--evaluator-timeout', '0.2')
+        elapsed = time.monotonic() - started
+        self.blocked(result, 'evaluator exceeded 0.2s')
+        self.assertLess(elapsed, 1.5, f'evaluator cleanup took {elapsed:.2f}s')
+
+    def test_keyboard_interrupt_cleans_evaluator(self):
+        import jev0
+        from unittest.mock import Mock, patch
+
+        process = Mock()
+        process.pid = 424242
+        process.communicate.side_effect = KeyboardInterrupt()
+        process.poll.return_value = None
+        evaluator = jev0.ProcessEvaluator(['fake'], 1, 100, 100)
+        with patch.object(jev0.subprocess, 'Popen', return_value=process), \
+             patch.object(jev0, 'terminate_process_group') as cleanup:
+            with self.assertRaisesRegex(jev0.Blocked, 'evaluator interrupted'):
+                evaluator.evaluate('diff')
+        cleanup.assert_called_once_with(process)
+
     def test_protocol_failures_block(self):
         self.stage('src/a')
         cases = [
@@ -353,6 +383,31 @@ class ProcessEvaluatorTests(unittest.TestCase):
         self.blocked(self.cli('staged', '--evaluator-command', self.command(code),
                               '--max-diff-bytes', '1'), 'diff exceeds 1 bytes')
         self.assertFalse((self.repo / 'evaluator-ran').exists())
+
+    def test_process_evaluator_uses_bounded_git_diff_reader(self):
+        import jev0
+        from unittest.mock import Mock, patch
+
+        self.stage('src/a', b'x' * 10000 + b'\n')
+        evaluator = Mock(spec=jev0.ProcessEvaluator)
+        evaluator.max_diff_bytes = 64
+        with patch.object(jev0, 'git_limited', wraps=jev0.git_limited) as limited:
+            with self.assertRaisesRegex(jev0.Blocked, 'diff exceeds 64 bytes'):
+                self.evaluate_process_evaluator_direct(evaluator)
+        self.assertTrue(limited.called)
+        evaluator.evaluate.assert_not_called()
+
+    def evaluate_process_evaluator_direct(self, evaluator):
+        import argparse
+        import jev0
+        from unittest.mock import patch
+
+        previous = os.getcwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(self.repo)
+        args = argparse.Namespace(max_files=20, max_lines=500, allow=[])
+        with patch.dict(os.environ, self.env):
+            jev0.staged(args, evaluator)
 
     def test_invalid_command_arguments(self):
         for value in ('not-json', '{}', '[]', '[""]', '[1]'):
