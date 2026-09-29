@@ -510,6 +510,123 @@ class PolicyDriftTests(unittest.TestCase):
         self.assertFalse(data['in_sync'])
         self.assertIn('managed hook is not enforced', data['reasons'])
 
+class RangeGuardTests(unittest.TestCase):
+    setUp = GuardTests.setUp
+    git = GuardTests.git
+    cli = GuardTests.cli
+    blocked = GuardTests.blocked
+
+    def commit_file(self, name, data, message):
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        self.git('add', '-f', '--', name)
+        self.git('commit', '-qm', message)
+        return self.git('rev-parse', 'HEAD').decode().strip()
+
+    def seed_base(self):
+        return self.commit_file('base.txt', b'base\n', 'base')
+
+    def test_range_allows_small_change(self):
+        base = self.seed_base()
+        head = self.commit_file('src/a.py', b'print(1)\n', 'head')
+        result = self.cli('range', base, head, '--max-files', '2', '--max-lines', '10')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_range_enforces_line_and_file_budgets(self):
+        base = self.seed_base()
+        self.commit_file('src/a.py', b'a\nb\n', 'a')
+        head = self.commit_file('src/b.py', b'x\n', 'b')
+        self.blocked(
+            self.cli('range', base, head, '--max-lines', '2'),
+            '3 added/deleted lines exceed budget 2',
+        )
+        self.blocked(
+            self.cli('range', base, head, '--max-files', '1'),
+            '2 range files exceed budget 1',
+        )
+
+    def test_range_enforces_scope(self):
+        base = self.seed_base()
+        head = self.commit_file('outside/a.py', b'x\n', 'outside')
+        self.blocked(
+            self.cli('range', base, head, '--allow', 'src'),
+            'outside allowed scope',
+        )
+
+    def test_range_rejects_model_and_binary_artifacts(self):
+        base = self.seed_base()
+        head = self.commit_file('weights.gguf', b'model\n', 'model')
+        self.blocked(self.cli('range', base, head), 'model artifact')
+
+        self.git('reset', '--hard', base)
+        head = self.commit_file('asset.dat', b'\x00\x01\x02', 'binary')
+        self.blocked(self.cli('range', base, head), 'binary change requires separate review')
+
+    def test_range_uses_merge_base_semantics(self):
+        base = self.seed_base()
+        self.git('checkout', '-qb', 'feature')
+        self.commit_file('src/feature.py', b'f\n', 'feature')
+        head = self.git('rev-parse', 'HEAD').decode().strip()
+
+        self.git('checkout', '-q', '-')
+        self.commit_file('unrelated.txt', b'u\n', 'base advance')
+        advanced_base = self.git('rev-parse', 'HEAD').decode().strip()
+
+        result = self.cli(
+            'range', advanced_base, head,
+            '--allow', 'src',
+            '--max-files', '1',
+            '--max-lines', '1',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_range_resolves_refs_before_diff(self):
+        self.seed_base()
+        self.git('branch', 'base-ref')
+        self.commit_file('src/a.py', b'x\n', 'head')
+        self.git('branch', 'head-ref')
+        result = self.cli('range', 'base-ref', 'head-ref', '--max-lines', '1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_range_rejects_unresolvable_or_option_like_refs(self):
+        self.seed_base()
+        for ref in ('--no-index', 'definitely-missing-ref'):
+            with self.subTest(ref=ref):
+                self.blocked(
+                    self.cli('range', ref, 'HEAD'),
+                    'cannot resolve commit ref',
+                )
+
+    def test_range_applies_explicit_policy(self):
+        base = self.seed_base()
+        head = self.commit_file('src/a.py', b'a\nb\n', 'head')
+        (self.repo / '.jev0.json').write_text(json.dumps({
+            'schema_version': 1,
+            'max_lines': 1,
+            'allow': ['src'],
+        }))
+        self.blocked(
+            self.cli('range', base, head, '--policy', '.jev0.json'),
+            '2 added/deleted lines exceed budget 1',
+        )
+
+    def test_range_supports_layer1_process_evaluator(self):
+        base = self.seed_base()
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        code = (
+            'import json,sys; '
+            'data=sys.stdin.read(); '
+            'print(json.dumps({"passed": "src/a.py" in data, "reason":"missing"}))'
+        )
+        command = json.dumps([sys.executable, '-c', code])
+        result = self.cli(
+            'range', base, head,
+            '--evaluator-command', command,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class DoctorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
