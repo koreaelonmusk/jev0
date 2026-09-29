@@ -393,6 +393,17 @@ class ProcessEvaluatorTests(unittest.TestCase):
                 evaluator.evaluate('diff')
         cleanup.assert_called_once_with(process)
 
+    def test_normal_evaluator_exit_does_not_kill_process_group(self):
+        import jev0
+        from unittest.mock import patch
+
+        command = [sys.executable, '-c',
+                   'print(\'{"passed":true,"reason":""}\')']
+        evaluator = jev0.ProcessEvaluator(command, 2, 1000, 1000)
+        with patch.object(jev0, 'terminate_process_group') as cleanup:
+            self.assertEqual(evaluator.evaluate('diff'), (True, ''))
+        cleanup.assert_not_called()
+
     def test_protocol_failures_block(self):
         self.stage('src/a')
         cases = [
