@@ -599,7 +599,7 @@ def resolve_guard_settings(args):
 
     root = repository_root()
     policy = getattr(args, "policy", None)
-    if policy:
+    if policy is not None:
         settings, policy_file = load_policy(policy, root)
         return settings, policy_file, root
 
