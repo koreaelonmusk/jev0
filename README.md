@@ -173,6 +173,77 @@ an executable jev0-managed pre-commit hook. When a hook was created from a polic
 manifest, `hook_policy_sha256` records the manifest fingerprint captured at
 initialization time. A true enforcement value is not a sandbox claim.
 
+## Server-side range guard
+
+Use `range` in CI to validate the full pull-request change set instead of only a
+developer's staged or working-tree state:
+
+```sh
+jev0 range <base-ref> <head-ref> --policy .jev0.json
+```
+
+jev0 resolves both refs to commit IDs first, then evaluates the merge-base diff
+(`base...head`) with the same Layer 0 rules used locally. This matches pull-request
+semantics: unrelated commits added to the base branch after the feature branch was
+created are not charged to the feature.
+
+The command accepts the same explicit policy and optional Layer 1 evaluator flags
+as `staged` and `workspace`. It does not fetch missing refs. CI must check out or
+fetch the base/head commits before calling it. Ref strings are resolved before
+being used in a diff so option-like user input is not passed directly to
+`git diff`.
+
+Example GitHub Actions usage after fetching the base commit:
+
+```sh
+jev0 range "$BASE_SHA" "$HEAD_SHA" --base-policy .github/jev0-policy.json
+```
+
+For server enforcement, prefer `--base-policy` over `--policy`. The policy blob
+is read from the already-resolved base commit, not from the pull-request head.
+That prevents a PR from weakening its own limits and then using those weaker
+limits to approve itself. Base-policy reads are bounded to 64 KiB and fail closed
+when the file is missing, invalid, oversized, or outside the supported schema.
+
+This repository's workflow also exposes one stable aggregate check named
+`jev0 gate`. After the feature is merged, configure the main-branch ruleset to
+require `jev0 gate`; the gate succeeds only when the full macOS/Linux × Python
+matrix succeeds.
+
+This is the server-enforced companion to the local hook: skipping `pre-commit`
+does not bypass a required CI range check.
+
+### Range evidence
+
+Use `range-report` when CI, audit, or incident review needs a machine-readable
+record of the exact decision inputs:
+
+```sh
+jev0 range-report "$BASE_SHA" "$HEAD_SHA" \
+  --base-policy .github/jev0-policy.json
+```
+
+The JSON schema is versioned and includes:
+
+- resolved base and head commit SHAs,
+- merge-base SHA,
+- policy source/path/SHA-256,
+- effective `max_files`, `max_lines`, and `allow`,
+- changed file count,
+- added + deleted line count,
+- changed paths,
+- final `allow` / `block` decision, and
+- the deterministic block reason when rejected.
+
+`range-report` and `range` share the same Layer 0 change-set analysis and
+enforcement function, so the report is evidence of the same decision rather than
+a second implementation of the rules.
+
+Range metadata is resource-bounded before parsing: jev0 reads at most 8 MiB
+from each Git metadata stream. Evidence JSON includes at most 1000 changed paths
+while preserving `paths_total` and `paths_truncated`, so extremely large change
+sets cannot force unbounded report growth.
+
 ## Universal workflow
 
 A practical tool-agnostic loop is:

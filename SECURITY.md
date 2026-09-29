@@ -31,3 +31,20 @@ the same user permissions can modify files, remove hooks, invoke Git with
 
 Use CI, protected branches, code review, and an OS/container sandbox when the
 agent itself is not trusted.
+
+## CI policy gate
+
+The optional `policy-gate.yml` workflow uses `pull_request_target` so its
+workflow definition, verifier, and policy come from the trusted base commit.
+Because this event can carry elevated trust, the workflow deliberately:
+
+- grants only `contents: read`,
+- checks out only the pull request base SHA,
+- never checks out or executes pull request head files,
+- fetches the pull request head only as Git object data,
+- verifies the fetched head SHA against the event payload, and
+- runs the base commit's `jev0.py` with the base commit's policy.
+
+Do not add build, test, package-install, shell-source, or other execution of
+pull-request head content to this workflow. Untrusted code belongs in the normal
+`pull_request` workflow with its restricted token.
