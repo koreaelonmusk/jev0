@@ -271,6 +271,26 @@ def git_version():
     return result.stdout.decode(errors="replace").strip() or None
 
 
+def parse_hook_layer0(command):
+    """Extract effective Layer 0 settings from one managed hook command."""
+
+    if len(command) < 3 or command[2] != "staged":
+        return None
+    parser = argparse.ArgumentParser(add_help=False)
+    add_guard_arguments(parser)
+    try:
+        parsed, unknown = parser.parse_known_args(command[3:])
+    except SystemExit:
+        return None
+    if unknown or parsed.policy is not None:
+        return None
+    return {
+        "max_files": DEFAULT_MAX_FILES if parsed.max_files is None else parsed.max_files,
+        "max_lines": DEFAULT_MAX_LINES if parsed.max_lines is None else parsed.max_lines,
+        "allow": [] if parsed.allow is None else parsed.allow,
+    }
+
+
 def doctor_repository_state():
     """Inspect repository/hook state without changing files or Git config."""
 
@@ -292,6 +312,9 @@ def doctor_repository_state():
             "hook_target_exists": False,
             "hook_matches_executable": False,
             "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
         }
 
     if root_result.returncode:
@@ -305,6 +328,9 @@ def doctor_repository_state():
             "hook_target_exists": False,
             "hook_matches_executable": False,
             "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
         }
 
     root = os.fsdecode(root_result.stdout.rstrip(b"\n"))
@@ -325,6 +351,9 @@ def doctor_repository_state():
             "hook_target_exists": False,
             "hook_matches_executable": False,
             "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
         }
     if custom.returncode != 1:
         return {
@@ -337,6 +366,9 @@ def doctor_repository_state():
             "hook_target_exists": False,
             "hook_matches_executable": False,
             "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
         }
 
     hook_result = subprocess.run(
@@ -356,6 +388,9 @@ def doctor_repository_state():
             "hook_target_exists": False,
             "hook_matches_executable": False,
             "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
         }
 
     hook = Path(os.fsdecode(hook_result.stdout.rstrip(b"\n")))
@@ -374,6 +409,9 @@ def doctor_repository_state():
             "hook_target_exists": False,
             "hook_matches_executable": False,
             "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
         }
     if not hook.exists():
         return {
@@ -386,6 +424,9 @@ def doctor_repository_state():
             "hook_target_exists": False,
             "hook_matches_executable": False,
             "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
         }
 
     try:
@@ -402,6 +443,9 @@ def doctor_repository_state():
                 "hook_target_exists": False,
                 "hook_matches_executable": False,
                 "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
             }
         hook_text = hook_prefix.decode(errors="replace")
         first_lines = hook_text.splitlines()[:2]
@@ -416,6 +460,9 @@ def doctor_repository_state():
             "hook_target_exists": False,
             "hook_matches_executable": False,
             "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
         }
 
     managed = "# jev0 managed pre-commit hook" in first_lines
@@ -445,6 +492,9 @@ def doctor_repository_state():
         "hook_target_exists": False,
         "hook_matches_executable": False,
         "hook_policy_sha256": None,
+        "hook_max_files": None,
+        "hook_max_lines": None,
+        "hook_allow": None,
     }
     state["hook_policy_sha256"] = policy_fingerprint
     if not managed:
@@ -463,9 +513,13 @@ def doctor_repository_state():
         state["hook_status"] = "managed-invalid"
         return state
 
-    if len(command) < 3 or command[2] != "staged":
+    layer0 = parse_hook_layer0(command)
+    if layer0 is None:
         state["hook_status"] = "managed-invalid"
         return state
+    state["hook_max_files"] = layer0["max_files"]
+    state["hook_max_lines"] = layer0["max_lines"]
+    state["hook_allow"] = layer0["allow"]
 
     hook_python = Path(command[0])
     hook_target = Path(command[1])
@@ -530,6 +584,9 @@ def doctor(args):
             "hook_target_exists",
             "hook_matches_executable",
             "hook_policy_sha256",
+            "hook_max_files",
+            "hook_max_lines",
+            "hook_allow",
             "hook_enforced",
         )
         for key in ordered:
@@ -661,6 +718,55 @@ def inspect_policy(args):
         print(f"max_lines: {state['max_lines']}")
         print("allow: " + (", ".join(state["allow"]) if state["allow"] else "(all paths)"))
     return 0
+
+
+def policy_check(args):
+    root = repository_root()
+    settings, resolved = load_policy(args.path, root)
+    policy_sha = file_sha256(resolved, POLICY_MAX_BYTES)
+    hook = doctor_repository_state()
+
+    reasons = []
+    if not hook["hook_enforced"]:
+        reasons.append("managed hook is not enforced")
+    if hook["hook_policy_sha256"] is None:
+        reasons.append("managed hook has no policy fingerprint")
+    elif hook["hook_policy_sha256"] != policy_sha:
+        reasons.append("policy fingerprint differs from managed hook snapshot")
+
+    expected = {
+        "max_files": settings.max_files,
+        "max_lines": settings.max_lines,
+        "allow": settings.allow,
+    }
+    actual = {
+        "max_files": hook.get("hook_max_files"),
+        "max_lines": hook.get("hook_max_lines"),
+        "allow": hook.get("hook_allow"),
+    }
+    if hook["hook_enforced"] and actual != expected:
+        reasons.append("managed hook Layer 0 settings differ from policy")
+
+    state = {
+        "schema_version": POLICY_SCHEMA_VERSION,
+        "policy_path": str(resolved),
+        "policy_sha256": policy_sha,
+        "hook_policy_sha256": hook["hook_policy_sha256"],
+        "expected": expected,
+        "actual": actual,
+        "in_sync": not reasons,
+        "reasons": reasons,
+    }
+    if args.json:
+        print(json.dumps(state, sort_keys=True, separators=(",", ":")))
+    elif state["in_sync"]:
+        print("policy_check: in-sync")
+        print(f"policy_sha256: {policy_sha}")
+    else:
+        print("policy_check: drift")
+        for reason in reasons:
+            print(f"reason: {reason}")
+    return 0 if state["in_sync"] else 1
 
 
 def positive(value):
@@ -1025,6 +1131,9 @@ def main():
     item = sub.add_parser("policy")
     item.add_argument("path", type=policy_argument)
     item.add_argument("--json", action="store_true")
+    item = sub.add_parser("policy-check")
+    item.add_argument("path", type=policy_argument)
+    item.add_argument("--json", action="store_true")
     args = parser.parse_args()
     if args.action in ("staged", "workspace", "init") and args.policy is not None:
         if args.max_files is not None or args.max_lines is not None or args.allow:
@@ -1040,6 +1149,7 @@ def main():
             "run": run,
             "doctor": doctor,
             "policy": inspect_policy,
+            "policy-check": policy_check,
         }[args.action](args) or 0
     except (Blocked, OSError, ValueError) as error:
         print("jev0: " + " ".join(str(error).splitlines()), file=sys.stderr)
