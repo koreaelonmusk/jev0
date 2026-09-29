@@ -270,6 +270,18 @@ This verifies deterministic integrity, not authorship. A valid digest proves onl
 that the evidence document is internally self-consistent; provenance still
 depends on where the evidence was produced and how that CI boundary is protected.
 
+Use `--repo-check` when the original repository objects are available:
+
+```sh
+jev0 evidence-verify evidence.json --repo-check
+```
+
+Repository checking resolves the recorded base/head commits, recomputes the
+merge base and range statistics, re-applies the recorded Layer 0 policy, and
+verifies base/worktree policy provenance when present. This distinguishes an
+internally self-consistent JSON document from evidence that actually describes
+the current repository object graph.
+
 ## Universal workflow
 
 A practical tool-agnostic loop is:
