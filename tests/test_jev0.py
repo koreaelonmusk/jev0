@@ -418,6 +418,464 @@ class PolicyTests(unittest.TestCase):
         self.assertIn('2 staged files exceed budget 1', commit.stderr)
 
 
+class PolicyDriftTests(unittest.TestCase):
+    setUp = GuardTests.setUp
+    git = GuardTests.git
+    cli = GuardTests.cli
+    stage = GuardTests.stage
+
+    def write_policy(self, document):
+        path = self.repo / '.jev0.json'
+        path.write_text(json.dumps(document))
+        return path
+
+    def init_policy(self, document=None):
+        policy = self.write_policy(document or {
+            'schema_version': 1,
+            'max_files': 2,
+            'max_lines': 50,
+            'allow': ['src'],
+        })
+        result = self.cli('init', '--policy', '.jev0.json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return policy
+
+    def test_policy_check_passes_when_snapshot_matches(self):
+        self.init_policy()
+        result = self.cli('policy-check', '.jev0.json', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data['in_sync'])
+        self.assertEqual(data['reasons'], [])
+        self.assertEqual(data['expected'], data['actual'])
+
+    def test_policy_check_detects_manifest_drift(self):
+        policy = self.init_policy()
+        policy.write_text(json.dumps({
+            'schema_version': 1,
+            'max_files': 9,
+            'max_lines': 900,
+            'allow': ['src'],
+        }))
+        result = self.cli('policy-check', '.jev0.json', '--json')
+        self.assertEqual(result.returncode, 1)
+        data = json.loads(result.stdout)
+        self.assertFalse(data['in_sync'])
+        self.assertIn(
+            'policy fingerprint differs from managed hook snapshot',
+            data['reasons'],
+        )
+        self.assertIn(
+            'managed hook Layer 0 settings differ from policy',
+            data['reasons'],
+        )
+
+    def test_policy_check_detects_hook_argument_tampering(self):
+        self.init_policy()
+        hook = self.repo / '.git/hooks/pre-commit'
+        text = hook.read_text().replace('--max-files 2', '--max-files 99')
+        hook.write_text(text)
+        hook.chmod(0o755)
+        result = self.cli('policy-check', '.jev0.json', '--json')
+        self.assertEqual(result.returncode, 1)
+        data = json.loads(result.stdout)
+        self.assertFalse(data['in_sync'])
+        self.assertIn(
+            'managed hook Layer 0 settings differ from policy',
+            data['reasons'],
+        )
+
+    def test_policy_check_detects_missing_fingerprint(self):
+        self.init_policy()
+        hook = self.repo / '.git/hooks/pre-commit'
+        lines = [
+            line for line in hook.read_text().splitlines()
+            if not line.startswith('# jev0 policy sha256: ')
+        ]
+        hook.write_text('\n'.join(lines) + '\n')
+        hook.chmod(0o755)
+        result = self.cli('policy-check', '.jev0.json', '--json')
+        self.assertEqual(result.returncode, 1)
+        data = json.loads(result.stdout)
+        self.assertIn(
+            'managed hook has no policy fingerprint',
+            data['reasons'],
+        )
+
+    def test_policy_check_detects_missing_hook(self):
+        self.write_policy({'schema_version': 1})
+        result = self.cli('policy-check', '.jev0.json', '--json')
+        self.assertEqual(result.returncode, 1)
+        data = json.loads(result.stdout)
+        self.assertFalse(data['in_sync'])
+        self.assertIn('managed hook is not enforced', data['reasons'])
+
+class RangeGuardTests(unittest.TestCase):
+    setUp = GuardTests.setUp
+    git = GuardTests.git
+    cli = GuardTests.cli
+    blocked = GuardTests.blocked
+
+    def commit_file(self, name, data, message):
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        self.git('add', '-f', '--', name)
+        self.git('commit', '-qm', message)
+        return self.git('rev-parse', 'HEAD').decode().strip()
+
+    def seed_base(self):
+        return self.commit_file('base.txt', b'base\n', 'base')
+
+    def test_range_allows_small_change(self):
+        base = self.seed_base()
+        head = self.commit_file('src/a.py', b'print(1)\n', 'head')
+        result = self.cli('range', base, head, '--max-files', '2', '--max-lines', '10')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_range_enforces_line_and_file_budgets(self):
+        base = self.seed_base()
+        self.commit_file('src/a.py', b'a\nb\n', 'a')
+        head = self.commit_file('src/b.py', b'x\n', 'b')
+        self.blocked(
+            self.cli('range', base, head, '--max-lines', '2'),
+            '3 added/deleted lines exceed budget 2',
+        )
+        self.blocked(
+            self.cli('range', base, head, '--max-files', '1'),
+            '2 range files exceed budget 1',
+        )
+
+    def test_range_enforces_scope(self):
+        base = self.seed_base()
+        head = self.commit_file('outside/a.py', b'x\n', 'outside')
+        self.blocked(
+            self.cli('range', base, head, '--allow', 'src'),
+            'outside allowed scope',
+        )
+
+    def test_range_rejects_model_and_binary_artifacts(self):
+        base = self.seed_base()
+        head = self.commit_file('weights.gguf', b'model\n', 'model')
+        self.blocked(self.cli('range', base, head), 'model artifact')
+
+        self.git('reset', '--hard', base)
+        head = self.commit_file('asset.dat', b'\x00\x01\x02', 'binary')
+        self.blocked(self.cli('range', base, head), 'binary change requires separate review')
+
+    def test_range_uses_merge_base_semantics(self):
+        base = self.seed_base()
+        self.git('checkout', '-qb', 'feature')
+        self.commit_file('src/feature.py', b'f\n', 'feature')
+        head = self.git('rev-parse', 'HEAD').decode().strip()
+
+        self.git('checkout', '-q', '-')
+        self.commit_file('unrelated.txt', b'u\n', 'base advance')
+        advanced_base = self.git('rev-parse', 'HEAD').decode().strip()
+
+        result = self.cli(
+            'range', advanced_base, head,
+            '--allow', 'src',
+            '--max-files', '1',
+            '--max-lines', '1',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_range_resolves_refs_before_diff(self):
+        self.seed_base()
+        self.git('branch', 'base-ref')
+        self.commit_file('src/a.py', b'x\n', 'head')
+        self.git('branch', 'head-ref')
+        result = self.cli('range', 'base-ref', 'head-ref', '--max-lines', '1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_range_rejects_unresolvable_or_option_like_refs(self):
+        self.seed_base()
+        option = self.cli('range', '--', '--no-index', 'HEAD')
+        self.assertEqual(option.returncode, 2)
+        self.assertIn(
+            'commit ref must be a non-empty single-line non-option string',
+            option.stderr,
+        )
+        self.blocked(
+            self.cli('range', 'definitely-missing-ref', 'HEAD'),
+            'cannot resolve commit ref',
+        )
+
+    def test_range_applies_explicit_policy(self):
+        base = self.seed_base()
+        head = self.commit_file('src/a.py', b'a\nb\n', 'head')
+        (self.repo / '.jev0.json').write_text(json.dumps({
+            'schema_version': 1,
+            'max_lines': 1,
+            'allow': ['src'],
+        }))
+        self.blocked(
+            self.cli('range', base, head, '--policy', '.jev0.json'),
+            '2 added/deleted lines exceed budget 1',
+        )
+
+    def test_range_supports_layer1_process_evaluator(self):
+        base = self.seed_base()
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        code = (
+            'import json,sys; '
+            'data=sys.stdin.read(); '
+            'print(json.dumps({"passed": "src/a.py" in data, "reason":"missing"}))'
+        )
+        command = json.dumps([sys.executable, '-c', code])
+        result = self.cli(
+            'range', base, head,
+            '--evaluator-command', command,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+    def test_range_base_policy_cannot_be_weakened_by_head(self):
+        (self.repo / '.jev0.json').write_text(json.dumps({
+            'schema_version': 1,
+            'max_files': 10,
+            'max_lines': 1,
+            'allow': ['src', '.jev0.json'],
+        }))
+        self.git('add', '.jev0.json')
+        self.git('commit', '-qm', 'trusted policy')
+        base = self.git('rev-parse', 'HEAD').decode().strip()
+
+        (self.repo / '.jev0.json').write_text(json.dumps({
+            'schema_version': 1,
+            'max_files': 100,
+            'max_lines': 10000,
+        }))
+        (self.repo / 'src').mkdir(exist_ok=True)
+        (self.repo / 'src/a.py').write_text('a\nb\n')
+        self.git('add', '.jev0.json', 'src/a.py')
+        self.git('commit', '-qm', 'weaken policy and add change')
+        head = self.git('rev-parse', 'HEAD').decode().strip()
+
+        self.blocked(
+            self.cli('range', base, head, '--base-policy', '.jev0.json'),
+            'added/deleted lines exceed budget 1',
+        )
+
+    def test_range_base_policy_missing_fails_closed(self):
+        base = self.seed_base()
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        self.blocked(
+            self.cli('range', base, head, '--base-policy', '.jev0.json'),
+            'cannot read base policy',
+        )
+
+    def test_range_base_policy_size_is_bounded(self):
+        (self.repo / '.jev0.json').write_bytes(b' ' * 65537)
+        self.git('add', '.jev0.json')
+        self.git('commit', '-qm', 'oversized policy')
+        base = self.git('rev-parse', 'HEAD').decode().strip()
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        self.blocked(
+            self.cli('range', base, head, '--base-policy', '.jev0.json'),
+            'policy exceeds 65536 bytes',
+        )
+
+    def test_range_base_policy_path_is_strict(self):
+        base = self.seed_base()
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        result = self.cli('range', base, head, '--base-policy', 'bad:path')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "base policy path must be a repository-relative file path without ':'",
+            result.stderr,
+        )
+
+    def test_range_base_policy_cannot_mix_with_other_layer0_options(self):
+        (self.repo / '.jev0.json').write_text(json.dumps({'schema_version': 1}))
+        self.git('add', '.jev0.json')
+        self.git('commit', '-qm', 'policy')
+        base = self.git('rev-parse', 'HEAD').decode().strip()
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        cases = [
+            ('--policy', '.jev0.json'),
+            ('--max-files', '1'),
+            ('--max-lines', '1'),
+            ('--allow', 'src'),
+        ]
+        for option in cases:
+            with self.subTest(option=option):
+                result = self.cli(
+                    'range', base, head,
+                    '--base-policy', '.jev0.json',
+                    *option,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn('--base-policy cannot be combined', result.stderr)
+
+
+class RangeEvidenceTests(unittest.TestCase):
+    setUp = GuardTests.setUp
+    git = GuardTests.git
+    cli = GuardTests.cli
+
+    def commit_file(self, name, data, message):
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        self.git('add', '-f', '--', name)
+        self.git('commit', '-qm', message)
+        return self.git('rev-parse', 'HEAD').decode().strip()
+
+    def test_range_report_allow_contains_deterministic_evidence(self):
+        base = self.commit_file('base.txt', b'base\n', 'base')
+        head = self.commit_file('src/a.py', b'a\nb\n', 'head')
+        merge_base = self.git('merge-base', base, head).decode().strip()
+
+        result = self.cli(
+            'range-report', base, head,
+            '--max-files', '2',
+            '--max-lines', '10',
+            '--allow', 'src',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['schema_version'], 1)
+        self.assertEqual(data['decision'], 'allow')
+        self.assertIsNone(data['reason'])
+        self.assertEqual(data['base_sha'], base)
+        self.assertEqual(data['head_sha'], head)
+        self.assertEqual(data['merge_base_sha'], merge_base)
+        self.assertEqual(data['policy_source'], 'flags')
+        self.assertIsNone(data['policy_sha256'])
+        self.assertEqual(data['files_changed'], 1)
+        self.assertEqual(data['lines_changed'], 2)
+        self.assertEqual(data['paths'], ['src/a.py'])
+        self.assertEqual(
+            data['policy'],
+            {'max_files': 2, 'max_lines': 10, 'allow': ['src']},
+        )
+
+    def test_range_report_block_preserves_evidence(self):
+        base = self.commit_file('base.txt', b'base\n', 'base')
+        head = self.commit_file('src/a.py', b'a\nb\n', 'head')
+        result = self.cli(
+            'range-report', base, head,
+            '--max-lines', '1',
+        )
+        self.assertEqual(result.returncode, 1)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['decision'], 'block')
+        self.assertEqual(data['files_changed'], 1)
+        self.assertEqual(data['lines_changed'], 2)
+        self.assertIn('exceed budget 1', data['reason'])
+
+    def test_range_report_records_worktree_policy_provenance(self):
+        base = self.commit_file('base.txt', b'base\n', 'base')
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        policy = self.repo / '.jev0.json'
+        policy.write_text(json.dumps({
+            'schema_version': 1,
+            'max_files': 5,
+            'max_lines': 5,
+            'allow': ['src'],
+        }))
+        result = self.cli(
+            'range-report', base, head,
+            '--policy', '.jev0.json',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['policy_source'], 'worktree')
+        self.assertEqual(data['policy_path'], str(policy.resolve()))
+        self.assertEqual(
+            data['policy_sha256'],
+            hashlib.sha256(policy.read_bytes()).hexdigest(),
+        )
+
+    def test_range_report_records_trusted_base_policy_provenance(self):
+        policy = self.repo / '.jev0.json'
+        policy.write_text(json.dumps({
+            'schema_version': 1,
+            'max_files': 5,
+            'max_lines': 5,
+        }))
+        self.git('add', '.jev0.json')
+        self.git('commit', '-qm', 'policy')
+        base = self.git('rev-parse', 'HEAD').decode().strip()
+        raw = self.git('show', f'{base}:.jev0.json')
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+
+        result = self.cli(
+            'range-report', base, head,
+            '--base-policy', '.jev0.json',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['policy_source'], 'base')
+        self.assertEqual(data['policy_path'], '.jev0.json')
+        self.assertEqual(
+            data['policy_sha256'],
+            hashlib.sha256(raw).hexdigest(),
+        )
+
+    def test_range_report_and_range_share_decision(self):
+        base = self.commit_file('base.txt', b'base\n', 'base')
+        head = self.commit_file('src/a.py', b'a\nb\n', 'head')
+        guarded = self.cli('range', base, head, '--max-lines', '1')
+        reported = self.cli('range-report', base, head, '--max-lines', '1')
+        self.assertEqual(guarded.returncode, reported.returncode)
+        self.assertIn('exceed budget 1', guarded.stderr)
+        self.assertIn('exceed budget 1', json.loads(reported.stdout)['reason'])
+
+
+    def test_range_report_truncates_evidence_paths_without_losing_counts(self):
+        import jev0
+        from unittest.mock import patch
+
+        base = self.commit_file('base.txt', b'base\n', 'base')
+        self.commit_file('src/a.py', b'a\n', 'a')
+        self.commit_file('src/b.py', b'b\n', 'b')
+        head = self.commit_file('src/c.py', b'c\n', 'c')
+
+        previous = os.getcwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(self.repo)
+        args = type('Args', (), {
+            'base': base,
+            'head': head,
+            'base_policy': None,
+            'policy': None,
+            'max_files': 10,
+            'max_lines': 10,
+            'allow': None,
+        })()
+        with patch.object(jev0, 'EVIDENCE_MAX_PATHS', 2):
+            from io import StringIO
+            with patch('sys.stdout', new_callable=StringIO) as stdout:
+                rc = jev0.range_report(args)
+                data = json.loads(stdout.getvalue())
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(data['files_changed'], 3)
+        self.assertEqual(data['paths_total'], 3)
+        self.assertTrue(data['paths_truncated'])
+        self.assertEqual(len(data['paths']), 2)
+
+    def test_range_metadata_read_is_bounded_before_full_buffering(self):
+        import jev0
+        from unittest.mock import patch
+
+        base = self.commit_file('base.txt', b'base\n', 'base')
+        head = self.commit_file('very-long-name-for-limit.py', b'x\n', 'head')
+
+        previous = os.getcwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(self.repo)
+        with patch.object(jev0, 'CHANGE_METADATA_MAX_BYTES', 8):
+            with self.assertRaisesRegex(
+                jev0.Blocked,
+                'change metadata exceeds 8 bytes',
+            ):
+                jev0.inspect_change_set(jev0.range_diff_prefix(base, head))
+
+
 class DoctorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -39,4 +39,17 @@ jobs:
           python3 jev0.py --version
           python3 jev0.py workspace
           python3 jev0.py doctor --json
+          python3 jev0.py range HEAD HEAD
           python3 jev0.py policy examples/policy.json --json
+          python3 jev0.py policy .github/jev0-policy.json --json
+
+  gate:
+    name: jev0 gate
+    if: ${{ always() }}
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require full matrix
+        env:
+          MATRIX_RESULT: ${{ needs.test.result }}
+        run: test "$MATRIX_RESULT" = "success"

@@ -24,6 +24,9 @@ DOCTOR_MAX_FILE_BYTES = 10_000_000
 DOCTOR_HOOK_PREFIX_BYTES = 16_384
 POLICY_SCHEMA_VERSION = 1
 POLICY_MAX_BYTES = 65_536
+EVIDENCE_SCHEMA_VERSION = 1
+CHANGE_METADATA_MAX_BYTES = 8_388_608
+EVIDENCE_MAX_PATHS = 1000
 DEFAULT_MAX_FILES = 20
 DEFAULT_MAX_LINES = 500
 
@@ -210,6 +213,35 @@ def git(*args):
     return result.stdout
 
 
+def git_output_limited(max_bytes, label, *args):
+    """Capture Git stdout with a hard byte ceiling and bounded diagnostics."""
+
+    with tempfile.TemporaryFile() as error_stream:
+        process = subprocess.Popen(
+            ["git", *args],
+            stdout=subprocess.PIPE,
+            stderr=error_stream,
+            start_new_session=True,
+        )
+        try:
+            output = process.stdout.read(max_bytes + 1)
+            if len(output) > max_bytes:
+                terminate_process_group(process)
+                raise Blocked(f"{label} exceeds {max_bytes} bytes")
+            returncode = process.wait()
+        except KeyboardInterrupt:
+            terminate_process_group(process)
+            raise Blocked("Git operation interrupted") from None
+        finally:
+            if process.stdout is not None and not process.stdout.closed:
+                process.stdout.close()
+        if returncode:
+            error_stream.seek(0)
+            detail = error_stream.read(GIT_ERROR_BYTES).decode(errors="replace").strip()
+            raise Blocked("Git operation failed: " + detail)
+        return output
+
+
 def git_limited(max_bytes, *args):
     """Read at most max_bytes + 1 bytes from Git before rejecting oversized output."""
 
@@ -271,6 +303,26 @@ def git_version():
     return result.stdout.decode(errors="replace").strip() or None
 
 
+def parse_hook_layer0(command):
+    """Extract effective Layer 0 settings from one managed hook command."""
+
+    if len(command) < 3 or command[2] != "staged":
+        return None
+    parser = argparse.ArgumentParser(add_help=False)
+    add_guard_arguments(parser)
+    try:
+        parsed, unknown = parser.parse_known_args(command[3:])
+    except SystemExit:
+        return None
+    if unknown or parsed.policy is not None:
+        return None
+    return {
+        "max_files": DEFAULT_MAX_FILES if parsed.max_files is None else parsed.max_files,
+        "max_lines": DEFAULT_MAX_LINES if parsed.max_lines is None else parsed.max_lines,
+        "allow": [] if parsed.allow is None else parsed.allow,
+    }
+
+
 def doctor_repository_state():
     """Inspect repository/hook state without changing files or Git config."""
 
@@ -292,6 +344,9 @@ def doctor_repository_state():
             "hook_target_exists": False,
             "hook_matches_executable": False,
             "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
         }
 
     if root_result.returncode:
@@ -305,6 +360,9 @@ def doctor_repository_state():
             "hook_target_exists": False,
             "hook_matches_executable": False,
             "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
         }
 
     root = os.fsdecode(root_result.stdout.rstrip(b"\n"))
@@ -325,6 +383,9 @@ def doctor_repository_state():
             "hook_target_exists": False,
             "hook_matches_executable": False,
             "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
         }
     if custom.returncode != 1:
         return {
@@ -337,6 +398,9 @@ def doctor_repository_state():
             "hook_target_exists": False,
             "hook_matches_executable": False,
             "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
         }
 
     hook_result = subprocess.run(
@@ -356,6 +420,9 @@ def doctor_repository_state():
             "hook_target_exists": False,
             "hook_matches_executable": False,
             "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
         }
 
     hook = Path(os.fsdecode(hook_result.stdout.rstrip(b"\n")))
@@ -374,6 +441,9 @@ def doctor_repository_state():
             "hook_target_exists": False,
             "hook_matches_executable": False,
             "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
         }
     if not hook.exists():
         return {
@@ -386,6 +456,9 @@ def doctor_repository_state():
             "hook_target_exists": False,
             "hook_matches_executable": False,
             "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
         }
 
     try:
@@ -402,6 +475,9 @@ def doctor_repository_state():
                 "hook_target_exists": False,
                 "hook_matches_executable": False,
                 "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
             }
         hook_text = hook_prefix.decode(errors="replace")
         first_lines = hook_text.splitlines()[:2]
@@ -416,6 +492,9 @@ def doctor_repository_state():
             "hook_target_exists": False,
             "hook_matches_executable": False,
             "hook_policy_sha256": None,
+            "hook_max_files": None,
+            "hook_max_lines": None,
+            "hook_allow": None,
         }
 
     managed = "# jev0 managed pre-commit hook" in first_lines
@@ -445,6 +524,9 @@ def doctor_repository_state():
         "hook_target_exists": False,
         "hook_matches_executable": False,
         "hook_policy_sha256": None,
+        "hook_max_files": None,
+        "hook_max_lines": None,
+        "hook_allow": None,
     }
     state["hook_policy_sha256"] = policy_fingerprint
     if not managed:
@@ -463,9 +545,13 @@ def doctor_repository_state():
         state["hook_status"] = "managed-invalid"
         return state
 
-    if len(command) < 3 or command[2] != "staged":
+    layer0 = parse_hook_layer0(command)
+    if layer0 is None:
         state["hook_status"] = "managed-invalid"
         return state
+    state["hook_max_files"] = layer0["max_files"]
+    state["hook_max_lines"] = layer0["max_lines"]
+    state["hook_allow"] = layer0["allow"]
 
     hook_python = Path(command[0])
     hook_target = Path(command[1])
@@ -530,6 +616,9 @@ def doctor(args):
             "hook_target_exists",
             "hook_matches_executable",
             "hook_policy_sha256",
+            "hook_max_files",
+            "hook_max_lines",
+            "hook_allow",
             "hook_enforced",
         )
         for key in ordered:
@@ -551,27 +640,8 @@ def policy_scope(value):
         raise Blocked("invalid policy scope: " + str(error)) from None
 
 
-def load_policy(path, root):
-    """Load one explicit, bounded, repository-contained Layer 0 policy."""
-
-    candidate = Path(path)
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    try:
-        resolved = candidate.resolve(strict=True)
-        resolved.relative_to(root.resolve())
-    except (OSError, ValueError):
-        raise Blocked("policy must be an existing file inside the repository") from None
-    if not resolved.is_file():
-        raise Blocked("policy must be a regular file")
-
-    try:
-        with resolved.open("rb") as stream:
-            raw = stream.read(POLICY_MAX_BYTES + 1)
-    except OSError as error:
-        raise Blocked("cannot read policy: " + str(error)) from None
-    if len(raw) > POLICY_MAX_BYTES:
-        raise Blocked(f"policy exceeds {POLICY_MAX_BYTES} bytes")
+def parse_policy_document(raw):
+    """Parse one bounded Layer 0 policy document from trusted bytes."""
 
     def strict_object(pairs):
         result = {}
@@ -618,7 +688,84 @@ def load_policy(path, root):
         max_files=max_files,
         max_lines=max_lines,
         allow=allow,
-    ), resolved
+    )
+
+
+def policy_tree_path(value):
+    if (
+        not isinstance(value, str)
+        or not value
+        or ":" in value
+        or "\0" in value
+        or "\n" in value
+        or "\r" in value
+    ):
+        raise argparse.ArgumentTypeError(
+            "base policy path must be a repository-relative file path without ':'"
+        )
+    return scope(value)
+
+
+def load_policy_from_commit(commit_sha, path):
+    """Load a bounded policy blob from one already-resolved commit."""
+
+    tree_path = policy_tree_path(path)
+    object_spec = f"{commit_sha}:{tree_path}"
+    with tempfile.TemporaryFile() as error_stream:
+        process = subprocess.Popen(
+            ["git", "show", "--no-ext-diff", "--no-textconv", object_spec],
+            stdout=subprocess.PIPE,
+            stderr=error_stream,
+            start_new_session=True,
+        )
+        try:
+            output = process.stdout.read(POLICY_MAX_BYTES + 1)
+            if len(output) > POLICY_MAX_BYTES:
+                terminate_process_group(process)
+                raise Blocked(f"policy exceeds {POLICY_MAX_BYTES} bytes")
+            returncode = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            terminate_process_group(process)
+            raise Blocked("base policy read timed out") from None
+        except KeyboardInterrupt:
+            terminate_process_group(process)
+            raise Blocked("base policy read interrupted") from None
+        finally:
+            if process.stdout is not None and not process.stdout.closed:
+                process.stdout.close()
+
+        if returncode:
+            error_stream.seek(0)
+            detail = error_stream.read(GIT_ERROR_BYTES).decode(errors="replace").strip()
+            suffix = ": " + detail if detail else ""
+            raise Blocked(f"cannot read base policy {tree_path!r}{suffix}")
+
+    return parse_policy_document(output), tree_path, hashlib.sha256(output).hexdigest()
+
+
+def load_policy(path, root):
+    """Load one explicit, bounded, repository-contained Layer 0 policy."""
+
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root.resolve())
+    except (OSError, ValueError):
+        raise Blocked("policy must be an existing file inside the repository") from None
+    if not resolved.is_file():
+        raise Blocked("policy must be a regular file")
+
+    try:
+        with resolved.open("rb") as stream:
+            raw = stream.read(POLICY_MAX_BYTES + 1)
+    except OSError as error:
+        raise Blocked("cannot read policy: " + str(error)) from None
+    if len(raw) > POLICY_MAX_BYTES:
+        raise Blocked(f"policy exceeds {POLICY_MAX_BYTES} bytes")
+
+    return parse_policy_document(raw), resolved
 
 
 def resolve_guard_settings(args):
@@ -663,6 +810,55 @@ def inspect_policy(args):
     return 0
 
 
+def policy_check(args):
+    root = repository_root()
+    settings, resolved = load_policy(args.path, root)
+    policy_sha = file_sha256(resolved, POLICY_MAX_BYTES)
+    hook = doctor_repository_state()
+
+    reasons = []
+    if not hook["hook_enforced"]:
+        reasons.append("managed hook is not enforced")
+    if hook["hook_policy_sha256"] is None:
+        reasons.append("managed hook has no policy fingerprint")
+    elif hook["hook_policy_sha256"] != policy_sha:
+        reasons.append("policy fingerprint differs from managed hook snapshot")
+
+    expected = {
+        "max_files": settings.max_files,
+        "max_lines": settings.max_lines,
+        "allow": settings.allow,
+    }
+    actual = {
+        "max_files": hook.get("hook_max_files"),
+        "max_lines": hook.get("hook_max_lines"),
+        "allow": hook.get("hook_allow"),
+    }
+    if hook["hook_enforced"] and actual != expected:
+        reasons.append("managed hook Layer 0 settings differ from policy")
+
+    state = {
+        "schema_version": POLICY_SCHEMA_VERSION,
+        "policy_path": str(resolved),
+        "policy_sha256": policy_sha,
+        "hook_policy_sha256": hook["hook_policy_sha256"],
+        "expected": expected,
+        "actual": actual,
+        "in_sync": not reasons,
+        "reasons": reasons,
+    }
+    if args.json:
+        print(json.dumps(state, sort_keys=True, separators=(",", ":")))
+    elif state["in_sync"]:
+        print("policy_check: in-sync")
+        print(f"policy_sha256: {policy_sha}")
+    else:
+        print("policy_check: drift")
+        for reason in reasons:
+            print(f"reason: {reason}")
+    return 0 if state["in_sync"] else 1
+
+
 def positive(value):
     number = int(value)
     if number <= 0:
@@ -688,6 +884,14 @@ def scope(value):
             "use a repository-relative file or directory without . or .."
         )
     return path
+
+
+def commit_ref_argument(value):
+    if not value or value.startswith("-") or "\0" in value or "\n" in value or "\r" in value:
+        raise argparse.ArgumentTypeError(
+            "commit ref must be a non-empty single-line non-option string"
+        )
+    return value
 
 
 def policy_argument(value):
@@ -729,6 +933,36 @@ def has_head():
     return result.returncode == 0
 
 
+def resolve_commit(ref):
+    """Resolve an explicit ref to a commit SHA without treating it as an option."""
+
+    if not isinstance(ref, str) or not ref or "\0" in ref or "\n" in ref or "\r" in ref:
+        raise Blocked("commit ref must be a non-empty single-line string")
+    result = subprocess.run(
+        [
+            "git",
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            ref + "^{commit}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode:
+        raise Blocked(f"cannot resolve commit ref: {ref!r}")
+    sha = result.stdout.decode("ascii", errors="strict").strip()
+    if not sha or any(ch not in "0123456789abcdefABCDEF" for ch in sha):
+        raise Blocked(f"Git returned an invalid commit id for {ref!r}")
+    return sha.lower()
+
+
+def range_diff_prefix(base_sha, head_sha):
+    return ["diff", f"{base_sha}...{head_sha}"]
+
+
 def diff_prefix(mode):
     if mode == "staged":
         return ["diff", "--cached"]
@@ -741,9 +975,9 @@ def mode_label(mode):
     return "staged" if mode == "staged" else "workspace"
 
 
-def unified_diff(mode, max_bytes=None):
+def unified_diff_prefix(prefix, max_bytes=None):
     args = (
-        *diff_prefix(mode),
+        *prefix,
         "--no-ext-diff",
         "--no-textconv",
         "--no-renames",
@@ -753,6 +987,10 @@ def unified_diff(mode, max_bytes=None):
     )
     output = git(*args) if max_bytes is None else git_limited(max_bytes, *args)
     return output.decode("utf-8", errors="replace")
+
+
+def unified_diff(mode, max_bytes=None):
+    return unified_diff_prefix(diff_prefix(mode), max_bytes)
 
 
 def evaluator_diff(mode, evaluator):
@@ -794,6 +1032,91 @@ def workspace(args, evaluator: Optional[GuardEvaluator] = None):
         run_evaluator(evaluator, evaluator_diff("workspace", evaluator))
 
 
+def inspect_change_set(prefix):
+    fields = git_output_limited(
+        CHANGE_METADATA_MAX_BYTES,
+        "change metadata",
+        *prefix,
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--numstat",
+        "-z",
+        "--",
+    ).split(b"\0")
+    entries = []
+    total = 0
+    for field in fields:
+        if not field:
+            continue
+        added, removed, raw_path = field.split(b"\t", 2)
+        path = os.fsdecode(raw_path)
+        if added != b"-" and removed != b"-":
+            total += int(added) + int(removed)
+        entries.append((added, removed, raw_path, path))
+
+    active = set(
+        git_output_limited(
+            CHANGE_METADATA_MAX_BYTES,
+            "active-path metadata",
+            *prefix,
+            "--no-ext-diff",
+            "--no-renames",
+            "--name-only",
+            "--diff-filter=ACMRT",
+            "-z",
+            "--",
+        ).split(b"\0")
+    )
+    paths = [entry[3] for entry in entries]
+    return {
+        "entries": entries,
+        "active": active,
+        "files_changed": len(entries),
+        "lines_changed": total,
+        "paths": paths[:EVIDENCE_MAX_PATHS],
+        "paths_truncated": len(paths) > EVIDENCE_MAX_PATHS,
+        "paths_total": len(paths),
+    }
+
+
+def enforce_change_set(args, label, analysis):
+    entries = analysis["entries"]
+    if len(entries) > args.max_files:
+        raise Blocked(f"{len(entries)} {label} files exceed budget {args.max_files}")
+
+    for added, removed, raw_path, path in entries:
+        if args.allow and not any(
+            path == p or path.startswith(p + "/") for p in args.allow
+        ):
+            raise Blocked(f"outside allowed scope: {path!r}")
+        parts = path.lower().split("/")
+        if raw_path in analysis["active"] and (
+            path.lower().endswith((".gguf", ".bin")) or "models" in parts
+        ):
+            raise Blocked(f"model artifact: {path!r}")
+        if added == b"-" or removed == b"-":
+            if raw_path in analysis["active"]:
+                raise Blocked(f"binary change requires separate review: {path!r}")
+
+    if analysis["lines_changed"] > args.max_lines:
+        raise Blocked(
+            f"{analysis['lines_changed']} added/deleted lines exceed budget {args.max_lines}"
+        )
+    return {
+        "files_changed": analysis["files_changed"],
+        "lines_changed": analysis["lines_changed"],
+        "paths": analysis["paths"],
+        "paths_truncated": analysis["paths_truncated"],
+        "paths_total": analysis["paths_total"],
+    }
+
+
+def heuristic_rules_for_prefix(args, label, prefix):
+    analysis = inspect_change_set(prefix)
+    return enforce_change_set(args, label, analysis)
+
+
 def heuristic_rules(args, mode):
     repository_root()
     if mode == "workspace":
@@ -807,54 +1130,91 @@ def heuristic_rules(args, mode):
         if untracked:
             path = os.fsdecode(untracked[0])
             raise Blocked(f"untracked file requires staging/review: {path!r}")
+    heuristic_rules_for_prefix(args, mode_label(mode), diff_prefix(mode))
 
-    prefix = diff_prefix(mode)
-    fields = git(
-        *prefix,
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-renames",
-        "--numstat",
-        "-z",
-        "--",
-    ).split(b"\0")
-    entries = [field.split(b"\t", 2) for field in fields if field]
-    label = mode_label(mode)
-    if len(entries) > args.max_files:
-        raise Blocked(f"{len(entries)} {label} files exceed budget {args.max_files}")
 
-    active = set(
-        git(
-            *prefix,
-            "--no-ext-diff",
-            "--no-renames",
-            "--name-only",
-            "--diff-filter=ACMRT",
-            "-z",
-            "--",
-        ).split(b"\0")
-    )
-    total = 0
-    for added, removed, raw_path in entries:
-        path = os.fsdecode(raw_path)
-        if args.allow and not any(
-            path == p or path.startswith(p + "/") for p in args.allow
-        ):
-            raise Blocked(f"outside allowed scope: {path!r}")
-        parts = path.lower().split("/")
-        if raw_path in active and (
-            path.lower().endswith((".gguf", ".bin")) or "models" in parts
-        ):
-            raise Blocked(f"model artifact: {path!r}")
-        if added == b"-" or removed == b"-":
-            if raw_path in active:
-                raise Blocked(f"binary change requires separate review: {path!r}")
-        else:
-            total += int(added) + int(removed)
-    if total > args.max_lines:
-        raise Blocked(
-            f"{total} added/deleted lines exceed budget {args.max_lines}"
+def range_report(args):
+    repository_root()
+    base_sha = resolve_commit(args.base)
+    head_sha = resolve_commit(args.head)
+    merge_base = git("merge-base", base_sha, head_sha).decode("ascii").strip()
+
+    policy_source = "flags"
+    policy_sha256 = None
+    policy_path = None
+    if args.base_policy is not None:
+        settings, tree_path, policy_sha256 = load_policy_from_commit(
+            base_sha, args.base_policy
         )
+        policy_source = "base"
+        policy_path = tree_path
+    elif args.policy is not None:
+        settings, resolved = load_policy(args.policy, Path.cwd())
+        policy_source = "worktree"
+        policy_path = str(resolved)
+        policy_sha256 = file_sha256(resolved, POLICY_MAX_BYTES)
+    else:
+        settings = argparse.Namespace(
+            max_files=DEFAULT_MAX_FILES if args.max_files is None else args.max_files,
+            max_lines=DEFAULT_MAX_LINES if args.max_lines is None else args.max_lines,
+            allow=[] if args.allow is None else args.allow,
+        )
+
+    prefix = range_diff_prefix(base_sha, head_sha)
+    analysis = inspect_change_set(prefix)
+    decision = "allow"
+    reason = None
+    try:
+        stats = enforce_change_set(settings, "range", analysis)
+    except Blocked as error:
+        decision = "block"
+        reason = str(error)
+        stats = {
+            "files_changed": analysis["files_changed"],
+            "lines_changed": analysis["lines_changed"],
+            "paths": analysis["paths"],
+            "paths_truncated": analysis["paths_truncated"],
+            "paths_total": analysis["paths_total"],
+        }
+
+    state = {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "decision": decision,
+        "reason": reason,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "merge_base_sha": merge_base,
+        "policy_source": policy_source,
+        "policy_path": policy_path,
+        "policy_sha256": policy_sha256,
+        "policy": {
+            "max_files": settings.max_files,
+            "max_lines": settings.max_lines,
+            "allow": settings.allow,
+        },
+        **stats,
+    }
+    print(json.dumps(state, sort_keys=True, separators=(",", ":")))
+    return 0 if decision == "allow" else 1
+
+
+def range_guard(args, evaluator: Optional[GuardEvaluator] = None):
+    root = repository_root()
+    base_sha = resolve_commit(args.base)
+    head_sha = resolve_commit(args.head)
+    if args.base_policy is not None:
+        settings, _, _ = load_policy_from_commit(base_sha, args.base_policy)
+    else:
+        settings, _, _ = resolve_guard_settings(args)
+    prefix = range_diff_prefix(base_sha, head_sha)
+    heuristic_rules_for_prefix(settings, "range", prefix)
+    if evaluator is not None:
+        max_bytes = (
+            evaluator.max_diff_bytes
+            if isinstance(evaluator, ProcessEvaluator)
+            else None
+        )
+        run_evaluator(evaluator, unified_diff_prefix(prefix, max_bytes))
 
 
 def ensure_managed_hook(hook, content):
@@ -1017,6 +1377,19 @@ def main():
     sub = parser.add_subparsers(dest="action", required=True)
     for name in ("staged", "workspace", "init"):
         add_guard_arguments(sub.add_parser(name))
+    item = sub.add_parser("range")
+    item.add_argument("base", type=commit_ref_argument)
+    item.add_argument("head", type=commit_ref_argument)
+    item.add_argument("--base-policy", type=policy_tree_path)
+    add_guard_arguments(item)
+    item = sub.add_parser("range-report")
+    item.add_argument("base", type=commit_ref_argument)
+    item.add_argument("head", type=commit_ref_argument)
+    item.add_argument("--base-policy", type=policy_tree_path)
+    item.add_argument("--policy", type=policy_argument)
+    item.add_argument("--max-files", type=positive)
+    item.add_argument("--max-lines", type=positive)
+    item.add_argument("--allow", type=scope, action="append")
     item = sub.add_parser("run")
     item.add_argument("--timeout", type=duration, required=True)
     item.add_argument("command", nargs=argparse.REMAINDER)
@@ -1025,21 +1398,38 @@ def main():
     item = sub.add_parser("policy")
     item.add_argument("path", type=policy_argument)
     item.add_argument("--json", action="store_true")
+    item = sub.add_parser("policy-check")
+    item.add_argument("path", type=policy_argument)
+    item.add_argument("--json", action="store_true")
     args = parser.parse_args()
-    if args.action in ("staged", "workspace", "init") and args.policy is not None:
+    if args.action in ("staged", "workspace", "init", "range", "range-report") and args.policy is not None:
         if args.max_files is not None or args.max_lines is not None or args.allow:
             parser.error("--policy cannot be combined with --max-files, --max-lines, or --allow")
+    if args.action in ("range", "range-report") and args.base_policy is not None:
+        if (
+            args.policy is not None
+            or args.max_files is not None
+            or args.max_lines is not None
+            or args.allow
+        ):
+            parser.error(
+                "--base-policy cannot be combined with --policy, --max-files, --max-lines, or --allow"
+            )
     try:
-        if args.action in ("staged", "workspace"):
+        if args.action in ("staged", "workspace", "range"):
             evaluator = build_evaluator(args)
-            return {"staged": staged, "workspace": workspace}[args.action](
-                args, evaluator
-            ) or 0
+            return {
+                "staged": staged,
+                "workspace": workspace,
+                "range": range_guard,
+            }[args.action](args, evaluator) or 0
         return {
             "init": init,
             "run": run,
             "doctor": doctor,
             "policy": inspect_policy,
+            "policy-check": policy_check,
+            "range-report": range_report,
         }[args.action](args) or 0
     except (Blocked, OSError, ValueError) as error:
         print("jev0: " + " ".join(str(error).splitlines()), file=sys.stderr)
