@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Local, deterministic Git change budgets and bounded command execution."""
 import argparse
+import hashlib
 import json
 import math
 import os
+import platform
 from pathlib import Path
 import selectors
 import shlex
@@ -228,6 +230,189 @@ def git_limited(max_bytes, *args):
             detail = error_stream.read(GIT_ERROR_BYTES).decode(errors="replace").strip()
             raise Blocked("Git operation failed: " + detail)
         return output
+
+
+def executable_sha256():
+    """Return the SHA-256 of the exact jev0 source/executable being run."""
+
+    path = Path(__file__).resolve()
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def git_version():
+    try:
+        result = subprocess.run(
+            ["git", "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode:
+        return None
+    return result.stdout.decode(errors="replace").strip() or None
+
+
+def doctor_repository_state():
+    """Inspect repository/hook state without changing files or Git config."""
+
+    try:
+        root_result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return {
+            "repository": False,
+            "repository_root": None,
+            "hook_status": "git-unavailable",
+            "hook_enforced": False,
+        }
+
+    if root_result.returncode:
+        return {
+            "repository": False,
+            "repository_root": None,
+            "hook_status": "not-a-repository",
+            "hook_enforced": False,
+        }
+
+    root = os.fsdecode(root_result.stdout.rstrip(b"\n"))
+    custom = subprocess.run(
+        ["git", "config", "--get", "core.hooksPath"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if custom.returncode == 0:
+        return {
+            "repository": True,
+            "repository_root": root,
+            "hook_status": "custom-hooks-path",
+            "hook_enforced": False,
+        }
+    if custom.returncode != 1:
+        return {
+            "repository": True,
+            "repository_root": root,
+            "hook_status": "git-config-error",
+            "hook_enforced": False,
+        }
+
+    hook_result = subprocess.run(
+        ["git", "rev-parse", "--git-path", "hooks/pre-commit"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if hook_result.returncode:
+        return {
+            "repository": True,
+            "repository_root": root,
+            "hook_status": "git-path-error",
+            "hook_enforced": False,
+        }
+
+    hook = Path(os.fsdecode(hook_result.stdout.rstrip(b"\n")))
+    if not hook.is_absolute():
+        hook = Path.cwd() / hook
+    hook = hook.absolute()
+
+    if hook.is_symlink():
+        return {
+            "repository": True,
+            "repository_root": root,
+            "hook_status": "symlink",
+            "hook_enforced": False,
+        }
+    if not hook.exists():
+        return {
+            "repository": True,
+            "repository_root": root,
+            "hook_status": "missing",
+            "hook_enforced": False,
+        }
+
+    try:
+        first_lines = hook.read_text(errors="replace").splitlines()[:2]
+    except OSError:
+        return {
+            "repository": True,
+            "repository_root": root,
+            "hook_status": "unreadable",
+            "hook_enforced": False,
+        }
+
+    managed = "# jev0 managed pre-commit hook" in first_lines
+    executable = os.access(hook, os.X_OK)
+    if managed and executable:
+        status = "managed"
+    elif managed:
+        status = "managed-not-executable"
+    else:
+        status = "foreign"
+
+    return {
+        "repository": True,
+        "repository_root": root,
+        "hook_status": status,
+        "hook_enforced": managed and executable,
+    }
+
+
+def doctor(args):
+    state = {
+        "version": VERSION,
+        "executable": str(Path(__file__).resolve()),
+        "executable_sha256": executable_sha256(),
+        "python_executable": sys.executable,
+        "python_version": platform.python_version(),
+        "platform": sys.platform,
+        "machine": platform.machine() or None,
+        "git_version": git_version(),
+        "posix_process_groups": os.name == "posix",
+    }
+    state.update(doctor_repository_state())
+    state["runtime_ready"] = bool(
+        state["git_version"]
+        and sys.version_info >= (3, 9)
+        and state["posix_process_groups"]
+    )
+
+    if args.json:
+        print(json.dumps(state, sort_keys=True, separators=(",", ":")))
+    else:
+        ordered = (
+            "version",
+            "executable",
+            "executable_sha256",
+            "python_executable",
+            "python_version",
+            "platform",
+            "machine",
+            "git_version",
+            "posix_process_groups",
+            "runtime_ready",
+            "repository",
+            "repository_root",
+            "hook_status",
+            "hook_enforced",
+        )
+        for key in ordered:
+            value = state[key]
+            if value is None:
+                value = "unavailable"
+            elif isinstance(value, bool):
+                value = "yes" if value else "no"
+            print(f"{key}: {value}")
+    return 0
 
 
 def positive(value):
@@ -569,6 +754,8 @@ def main():
     item = sub.add_parser("run")
     item.add_argument("--timeout", type=duration, required=True)
     item.add_argument("command", nargs=argparse.REMAINDER)
+    item = sub.add_parser("doctor")
+    item.add_argument("--json", action="store_true")
     args = parser.parse_args()
     try:
         if args.action in ("staged", "workspace"):
@@ -576,7 +763,7 @@ def main():
             return {"staged": staged, "workspace": workspace}[args.action](
                 args, evaluator
             ) or 0
-        return {"init": init, "run": run}[args.action](args) or 0
+        return {"init": init, "run": run, "doctor": doctor}[args.action](args) or 0
     except (Blocked, OSError, ValueError) as error:
         print("jev0: " + " ".join(str(error).splitlines()), file=sys.stderr)
         return 1
