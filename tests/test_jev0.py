@@ -389,13 +389,13 @@ class ProcessEvaluatorTests(unittest.TestCase):
         from unittest.mock import Mock, patch
 
         self.stage('src/a', b'x' * 10000 + b'\n')
-        evaluator = Mock(spec=jev0.ProcessEvaluator)
-        evaluator.max_diff_bytes = 64
-        with patch.object(jev0, 'git_limited', wraps=jev0.git_limited) as limited:
+        evaluator = jev0.ProcessEvaluator(['never-runs'], 1, 64, 100)
+        with patch.object(evaluator, 'evaluate') as evaluate, \
+             patch.object(jev0, 'git_limited', wraps=jev0.git_limited) as limited:
             with self.assertRaisesRegex(jev0.Blocked, 'diff exceeds 64 bytes'):
                 self.evaluate_process_evaluator_direct(evaluator)
         self.assertTrue(limited.called)
-        evaluator.evaluate.assert_not_called()
+        evaluate.assert_not_called()
 
     def evaluate_process_evaluator_direct(self, evaluator):
         import argparse
