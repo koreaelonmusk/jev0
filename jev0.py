@@ -449,7 +449,7 @@ def doctor_repository_state():
             state["hook_matches_executable"] = (
                 file_sha256(hook_target, DOCTOR_MAX_FILE_BYTES) == executable_sha256()
             )
-        except OSError:
+        except (OSError, Blocked):
             state["hook_matches_executable"] = False
 
     state["hook_enforced"] = python_exists and target_exists
