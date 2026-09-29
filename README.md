@@ -228,6 +228,8 @@ The JSON schema is versioned and includes:
 - resolved base and head commit SHAs,
 - merge-base SHA,
 - policy source/path/SHA-256,
+- verifier version and exact jev0 source SHA-256,
+- canonical evidence SHA-256,
 - effective `max_files`, `max_lines`, and `allow`,
 - changed file count,
 - added + deleted line count,
@@ -238,6 +240,11 @@ The JSON schema is versioned and includes:
 `range-report` and `range` share the same Layer 0 change-set analysis and
 enforcement function, so the report is evidence of the same decision rather than
 a second implementation of the rules.
+
+The evidence digest is a deterministic integrity identifier over the canonical
+JSON fields before `evidence_sha256` is added. It is **not** a digital signature
+and does not by itself authenticate who produced the report. Authenticity still
+depends on the trusted CI boundary, protected base branch, and verifier provenance.
 
 Range metadata is resource-bounded before parsing: jev0 reads at most 8 MiB
 from each Git metadata stream. Evidence JSON includes at most 1000 changed paths
