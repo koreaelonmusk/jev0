@@ -25,7 +25,7 @@ jev0 init
 those cases. Run `init` again with the same arguments safely. No shell profiles,
 agent instructions, or global Git settings are edited.
 
-## Four commands
+## Five commands
 
 ```sh
 # Check all tracked changes against HEAD, including unstaged edits.
@@ -42,6 +42,10 @@ jev0 init --allow src --allow tests --max-files 10 --max-lines 300
 
 # Bound one foreground command and its ordinary child processes.
 jev0 run --timeout 30 -- python3 -m unittest discover -s tests
+
+# Inspect runtime, executable hash, repository, and hook state without mutation.
+jev0 doctor
+jev0 doctor --json
 ```
 
 | Check | Default |
@@ -95,6 +99,17 @@ You can add this to the instruction file your agent actually reads:
 Cursor, Claude Code, Codex, and Windsurf can use this CLI wherever they can run
 local commands. Automatic interception in these tools has not been tested.
 See [docs/UNIVERSAL.md](docs/UNIVERSAL.md) for the vendor-neutral integration contract.
+
+## Doctor
+
+`jev0 doctor` is read-only. It reports the exact executable path and SHA-256,
+Python/Git/platform information, whether the current directory is in a Git
+repository, and whether a jev0-managed pre-commit hook is actually executable.
+
+Use `jev0 doctor --json` for scripts and support reports. `runtime_ready`
+means the local runtime satisfies jev0's current Python/Git/POSIX requirements;
+`hook_enforced` is separate and only reports whether the current repository has
+an executable jev0-managed pre-commit hook. A true value is not a sandbox claim.
 
 ## Universal workflow
 
