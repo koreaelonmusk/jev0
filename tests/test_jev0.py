@@ -384,10 +384,9 @@ class ProcessEvaluatorTests(unittest.TestCase):
 
         process = Mock()
         process.pid = 424242
-        process.communicate.side_effect = KeyboardInterrupt()
-        process.poll.return_value = None
         evaluator = jev0.ProcessEvaluator(['fake'], 1, 100, 100)
         with patch.object(jev0.subprocess, 'Popen', return_value=process), \
+             patch.object(jev0, 'capture_process_output', side_effect=KeyboardInterrupt()), \
              patch.object(jev0, 'terminate_process_group') as cleanup:
             with self.assertRaisesRegex(jev0.Blocked, 'evaluator interrupted'):
                 evaluator.evaluate('diff')
