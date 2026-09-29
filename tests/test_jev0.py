@@ -631,6 +631,85 @@ class RangeGuardTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+    def test_range_base_policy_cannot_be_weakened_by_head(self):
+        (self.repo / '.jev0.json').write_text(json.dumps({
+            'schema_version': 1,
+            'max_files': 1,
+            'max_lines': 1,
+            'allow': ['src'],
+        }))
+        self.git('add', '.jev0.json')
+        self.git('commit', '-qm', 'trusted policy')
+        base = self.git('rev-parse', 'HEAD').decode().strip()
+
+        (self.repo / '.jev0.json').write_text(json.dumps({
+            'schema_version': 1,
+            'max_files': 100,
+            'max_lines': 10000,
+        }))
+        (self.repo / 'src').mkdir(exist_ok=True)
+        (self.repo / 'src/a.py').write_text('a\nb\n')
+        self.git('add', '.jev0.json', 'src/a.py')
+        self.git('commit', '-qm', 'weaken policy and add change')
+        head = self.git('rev-parse', 'HEAD').decode().strip()
+
+        self.blocked(
+            self.cli('range', base, head, '--base-policy', '.jev0.json'),
+            '3 added/deleted lines exceed budget 1',
+        )
+
+    def test_range_base_policy_missing_fails_closed(self):
+        base = self.seed_base()
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        self.blocked(
+            self.cli('range', base, head, '--base-policy', '.jev0.json'),
+            'cannot read base policy',
+        )
+
+    def test_range_base_policy_size_is_bounded(self):
+        (self.repo / '.jev0.json').write_bytes(b' ' * 65537)
+        self.git('add', '.jev0.json')
+        self.git('commit', '-qm', 'oversized policy')
+        base = self.git('rev-parse', 'HEAD').decode().strip()
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        self.blocked(
+            self.cli('range', base, head, '--base-policy', '.jev0.json'),
+            'policy exceeds 65536 bytes',
+        )
+
+    def test_range_base_policy_path_is_strict(self):
+        base = self.seed_base()
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        result = self.cli('range', base, head, '--base-policy', 'bad:path')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            "base policy path must be a repository-relative file path without ':'",
+            result.stderr,
+        )
+
+    def test_range_base_policy_cannot_mix_with_other_layer0_options(self):
+        (self.repo / '.jev0.json').write_text(json.dumps({'schema_version': 1}))
+        self.git('add', '.jev0.json')
+        self.git('commit', '-qm', 'policy')
+        base = self.git('rev-parse', 'HEAD').decode().strip()
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        cases = [
+            ('--policy', '.jev0.json'),
+            ('--max-files', '1'),
+            ('--max-lines', '1'),
+            ('--allow', 'src'),
+        ]
+        for option in cases:
+            with self.subTest(option=option):
+                result = self.cli(
+                    'range', base, head,
+                    '--base-policy', '.jev0.json',
+                    *option,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn('--base-policy cannot be combined', result.stderr)
+
+
 class DoctorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
