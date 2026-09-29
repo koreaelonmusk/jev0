@@ -42,6 +42,9 @@ jobs:
           python3 jev0.py range HEAD HEAD
           python3 jev0.py policy examples/policy.json --json
           python3 jev0.py policy .github/jev0-policy.json --json
+          python3 jev0.py range-report HEAD HEAD > "$RUNNER_TEMP/jev0-evidence.json"
+          python3 jev0.py evidence-verify "$RUNNER_TEMP/jev0-evidence.json" \
+            --require-current-verifier
 
   gate:
     name: jev0 gate
