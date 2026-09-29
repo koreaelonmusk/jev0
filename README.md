@@ -213,6 +213,32 @@ matrix succeeds.
 This is the server-enforced companion to the local hook: skipping `pre-commit`
 does not bypass a required CI range check.
 
+### Range evidence
+
+Use `range-report` when CI, audit, or incident review needs a machine-readable
+record of the exact decision inputs:
+
+```sh
+jev0 range-report "$BASE_SHA" "$HEAD_SHA" \
+  --base-policy .github/jev0-policy.json
+```
+
+The JSON schema is versioned and includes:
+
+- resolved base and head commit SHAs,
+- merge-base SHA,
+- policy source/path/SHA-256,
+- effective `max_files`, `max_lines`, and `allow`,
+- changed file count,
+- added + deleted line count,
+- changed paths,
+- final `allow` / `block` decision, and
+- the deterministic block reason when rejected.
+
+`range-report` and `range` share the same Layer 0 change-set analysis and
+enforcement function, so the report is evidence of the same decision rather than
+a second implementation of the rules.
+
 ## Universal workflow
 
 A practical tool-agnostic loop is:
