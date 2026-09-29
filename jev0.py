@@ -41,26 +41,39 @@ class ProcessEvaluator:
         payload = diff_text.encode("utf-8")
         if len(payload) > self.max_diff_bytes:
             raise Blocked(f"Layer 1 diff exceeds {self.max_diff_bytes} bytes")
-        process = subprocess.Popen(
-            self.command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-        try:
-            output, error = process.communicate(payload, timeout=self.timeout)
-        except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
+        with tempfile.TemporaryFile() as output_stream, tempfile.TemporaryFile() as error_stream:
+            process = subprocess.Popen(
+                self.command,
+                stdin=subprocess.PIPE,
+                stdout=output_stream,
+                stderr=error_stream,
+                start_new_session=True,
+            )
+            try:
+                process.communicate(payload, timeout=self.timeout)
+            except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
+                terminate_process_group(process)
+                if isinstance(error, KeyboardInterrupt):
+                    raise Blocked("Layer 1 evaluator interrupted") from None
+                raise Blocked(f"Layer 1 evaluator exceeded {self.timeout:g}s") from None
+
+            # A well-behaved evaluator waits for its children. Kill any same-group
+            # leftovers after the leader exits so they cannot leak past evaluation.
             terminate_process_group(process)
-            if isinstance(error, KeyboardInterrupt):
-                raise Blocked("Layer 1 evaluator interrupted") from None
-            raise Blocked(f"Layer 1 evaluator exceeded {self.timeout:g}s") from None
-        if process.returncode:
-            detail = error[: self.max_output_bytes].decode(errors="replace").strip()
-            suffix = ": " + detail if detail else ""
-            raise Blocked(f"Layer 1 evaluator exited {process.returncode}{suffix}")
-        if len(output) > self.max_output_bytes:
-            raise Blocked(f"Layer 1 output exceeds {self.max_output_bytes} bytes")
+
+            output_stream.seek(0)
+            output = output_stream.read(self.max_output_bytes + 1)
+            if len(output) > self.max_output_bytes:
+                raise Blocked(f"Layer 1 output exceeds {self.max_output_bytes} bytes")
+
+            if process.returncode:
+                error_stream.seek(0)
+                detail = error_stream.read(self.max_output_bytes).decode(
+                    errors="replace"
+                ).strip()
+                suffix = ": " + detail if detail else ""
+                raise Blocked(f"Layer 1 evaluator exited {process.returncode}{suffix}")
+
         try:
             result = json.loads(output)
         except (UnicodeDecodeError, json.JSONDecodeError):
