@@ -31,6 +31,9 @@ agent instructions, or global Git settings are edited.
 # Check the index, including forcibly staged ignored files.
 jev0 staged
 
+# Run Layer 0, then an explicit external Layer 1 evaluator.
+jev0 staged --evaluator-command '["python3","./evaluate.py"]'
+
 # Persist an explicit scope and budget in a project's new hook.
 jev0 init --allow src --allow tests --max-files 10 --max-lines 300
 
@@ -106,7 +109,7 @@ local Layer 0 measurement, not a Linux result or a latency guarantee. Linux CI
 verifies correctness; Linux latency has not been measured here. Interpreter,
 Git, and policy overhead were not timed separately.
 
-## Optional Layer 1 evaluator API
+## Optional Layer 1 evaluators
 
 Layer 0 remains the default: deterministic checks on structured Git metadata.
 Passing Layer 0 means the configured rules passed, not that code is bug-free.
@@ -130,10 +133,44 @@ rather than reparsing the text patch. The index must remain unchanged throughout
 the check; this API does not lock out concurrent staging.
 
 This is an API slot, not a shipped GGUF integration. There is no model, CLI plugin
-loader, automatic discovery, or inference timeout. Evaluators execute trusted
-Python code in-process and must manage their own resources and inference limits.
-A future GGUF evaluator can implement this interface without replacing Layer 0;
-model quality, calibration, and latency still require separate validation.
+loader or automatic discovery. In-process evaluators execute trusted Python code
+and must manage their own resources and inference limits.
+
+The CLI can run a trusted evaluator process after Layer 0:
+
+```sh
+jev0 staged \
+  --evaluator-command '["python3","./evaluate.py"]' \
+  --evaluator-timeout 30 \
+  --max-diff-bytes 1000000 \
+  --max-evaluator-output-bytes 4096
+```
+
+`--evaluator-command` is a JSON array of literal arguments. No shell parses it.
+The process receives the staged UTF-8 diff on stdin and must write exactly one
+JSON value to stdout:
+
+```json
+{"passed": false, "reason": "change is unrelated to the requested scope"}
+```
+
+The object must contain only `passed` (boolean) and `reason` (string), and exit
+zero. Rejection, timeout, launch failure, nonzero exit, malformed output, excess
+diff size, or excess response size blocks the check. On timeout, jev0 kills the
+evaluator's POSIX process group. As with `jev0 run`, a process that starts another
+session can escape that group. The response-size check occurs after the process
+exits; it is a protocol limit, not a memory sandbox for malicious evaluators.
+Nonzero-exit stderr diagnostics are truncated to the configured response limit.
+
+Use the same options with `jev0 init` to persist the policy in a new pre-commit
+hook. Commands using repository-relative paths run from the repository root.
+The hook stores the literal command and absolute jev0/Python paths, so moving any
+of them requires recreating the hook. Existing hooks remain preserved.
+
+This protocol can wrap a future GGUF evaluator without replacing Layer 0, but no
+model runtime, weights, prompt, or calibrated classifier ships here. The evaluator
+command is trusted code with the user's permissions. Model quality, calibration,
+latency, and resource consumption require separate measurement.
 
 ## Remove or update
 

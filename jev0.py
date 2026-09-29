@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local, deterministic Git change budgets and bounded command execution."""
 import argparse
+import json
 import math
 import os
 from pathlib import Path
@@ -20,6 +21,46 @@ class GuardEvaluator(Protocol):
 
     def evaluate(self, diff_text: str) -> tuple[bool, str]:
         ...
+
+
+class ProcessEvaluator:
+    """Run a trusted Layer 1 evaluator using a strict stdin/stdout protocol."""
+
+    def __init__(self, command, timeout, max_diff_bytes, max_output_bytes):
+        self.command = command
+        self.timeout = timeout
+        self.max_diff_bytes = max_diff_bytes
+        self.max_output_bytes = max_output_bytes
+
+    def evaluate(self, diff_text: str) -> tuple[bool, str]:
+        payload = diff_text.encode('utf-8')
+        if len(payload) > self.max_diff_bytes:
+            raise Blocked(f'Layer 1 diff exceeds {self.max_diff_bytes} bytes')
+        process = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            output, error = process.communicate(payload, timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+            raise Blocked(f'Layer 1 evaluator exceeded {self.timeout:g}s') from None
+        if process.returncode:
+            detail = error[:self.max_output_bytes].decode(errors='replace').strip()
+            suffix = ': ' + detail if detail else ''
+            raise Blocked(f'Layer 1 evaluator exited {process.returncode}{suffix}')
+        if len(output) > self.max_output_bytes:
+            raise Blocked(f'Layer 1 output exceeds {self.max_output_bytes} bytes')
+        try:
+            result = json.loads(output)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise Blocked('Layer 1 evaluator returned invalid JSON') from None
+        if (not isinstance(result, dict) or set(result) != {'passed', 'reason'}
+                or type(result['passed']) is not bool or not isinstance(result['reason'], str)):
+            raise Blocked('Layer 1 JSON must contain only passed (bool) and reason (str)')
+        return result['passed'], result['reason']
 
 
 def git(*args):
@@ -50,6 +91,17 @@ def scope(value):
     return path
 
 
+def evaluator_command(value):
+    try:
+        command = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise argparse.ArgumentTypeError('must be a JSON array of command arguments') from error
+    if (not isinstance(command, list) or not command
+            or any(not isinstance(part, str) or not part for part in command)):
+        raise argparse.ArgumentTypeError('must be a non-empty JSON array of non-empty strings')
+    return command
+
+
 def staged(args, evaluator: Optional[GuardEvaluator] = None):
     heuristic_rules(args)
     if evaluator is None:
@@ -58,6 +110,8 @@ def staged(args, evaluator: Optional[GuardEvaluator] = None):
                     '--no-renames', '--no-color', '--patch', '--').decode('utf-8', errors='replace')
     try:
         result = evaluator.evaluate(diff_text)
+    except Blocked:
+        raise
     except Exception as error:
         raise Blocked('Layer 1 evaluator failed: ' + str(error)) from None
     if (not isinstance(result, tuple) or len(result) != 2
@@ -108,6 +162,11 @@ def init(args):
                '--max-files', str(args.max_files), '--max-lines', str(args.max_lines)]
     for allowed in args.allow:
         command.extend(['--allow', allowed])
+    if args.evaluator_command:
+        command.extend(['--evaluator-command', json.dumps(args.evaluator_command, separators=(',', ':')),
+                        '--evaluator-timeout', str(args.evaluator_timeout),
+                        '--max-diff-bytes', str(args.max_diff_bytes),
+                        '--max-evaluator-output-bytes', str(args.max_evaluator_output_bytes)])
     content = '#!/bin/sh\n# jev0 managed pre-commit hook\nexec ' + shlex.join(command) + '\n'
     if hook.is_symlink():
         raise Blocked('existing hook is a symlink; integrate manually')
@@ -153,12 +212,22 @@ def main():
         item.add_argument('--max-files', type=positive, default=20)
         item.add_argument('--max-lines', type=positive, default=500)
         item.add_argument('--allow', type=scope, action='append', default=[])
+        item.add_argument('--evaluator-command', type=evaluator_command)
+        item.add_argument('--evaluator-timeout', type=duration, default=30.0)
+        item.add_argument('--max-diff-bytes', type=positive, default=1_000_000)
+        item.add_argument('--max-evaluator-output-bytes', type=positive, default=4096)
     item = sub.add_parser('run')
     item.add_argument('--timeout', type=duration, required=True)
     item.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     try:
-        return {'staged': staged, 'init': init, 'run': run}[args.action](args) or 0
+        if args.action == 'staged':
+            evaluator = None
+            if args.evaluator_command:
+                evaluator = ProcessEvaluator(args.evaluator_command, args.evaluator_timeout,
+                                             args.max_diff_bytes, args.max_evaluator_output_bytes)
+            return staged(args, evaluator) or 0
+        return {'init': init, 'run': run}[args.action](args) or 0
     except (Blocked, OSError, ValueError) as error:
         print('jev0: ' + ' '.join(str(error).splitlines()), file=sys.stderr)
         return 1

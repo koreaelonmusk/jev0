@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -277,6 +278,100 @@ class EvaluatorTests(unittest.TestCase):
         evaluator.evaluate.return_value = (False, ' ')
         with self.assertRaisesRegex(jev0.Blocked, 'rejected without a reason'):
             self.evaluate(evaluator)
+
+
+class ProcessEvaluatorTests(unittest.TestCase):
+    setUp = GuardTests.setUp
+    git = GuardTests.git
+    cli = GuardTests.cli
+    stage = GuardTests.stage
+    blocked = GuardTests.blocked
+
+    def command(self, code):
+        return json.dumps([sys.executable, '-c', code])
+
+    def test_cli_allows_and_receives_staged_diff(self):
+        self.stage('src/a', b'expected staged value\n')
+        code = ('import json,sys; data=sys.stdin.read(); '
+                'print(json.dumps({"passed":"+expected staged value" in data,"reason":"missing diff"}))')
+        result = self.cli('staged', '--evaluator-command', self.command(code))
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, '', ''))
+
+    def test_cli_rejects_and_preserves_index(self):
+        self.stage('src/a')
+        before = self.git('diff', '--cached')
+        code = 'print(\'{"passed":false,"reason":"semantic rejection"}\')'
+        self.blocked(self.cli('staged', '--evaluator-command', self.command(code)),
+                     'Layer 1: semantic rejection')
+        self.assertEqual(before, self.git('diff', '--cached'))
+
+    def test_layer_zero_runs_before_process(self):
+        self.stage('weights.gguf')
+        code = 'from pathlib import Path; Path("evaluator-ran").touch()'
+        self.blocked(self.cli('staged', '--evaluator-command', self.command(code)), 'model artifact')
+        self.assertFalse((self.repo / 'evaluator-ran').exists())
+
+    def test_command_arguments_are_literal(self):
+        self.stage('src/a')
+        marker = '$(touch evaluator-injected)'
+        code = ('import json,sys; print(json.dumps({"passed":sys.argv[1].startswith("$("),'
+                '"reason":"argument changed"}))')
+        command = json.dumps([sys.executable, '-c', code, marker])
+        result = self.cli('staged', '--evaluator-command', command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.repo / 'evaluator-injected').exists())
+
+    def test_timeout_kills_evaluator_group(self):
+        self.stage('src/a')
+        code = ('import subprocess,sys,time; '
+                'subprocess.Popen([sys.executable,"-c",'
+                '"import time,pathlib; time.sleep(1); pathlib.Path(\'escaped-evaluator\').touch()"]); '
+                'time.sleep(20)')
+        self.blocked(self.cli('staged', '--evaluator-command', self.command(code),
+                              '--evaluator-timeout', '0.3'), 'evaluator exceeded 0.3s')
+        time.sleep(1.1)
+        self.assertFalse((self.repo / 'escaped-evaluator').exists())
+
+    def test_protocol_failures_block(self):
+        self.stage('src/a')
+        cases = [
+            ('print("not json")', 'invalid JSON'),
+            ('print(\'{"passed":1,"reason":"bad"}\')', 'must contain only'),
+            ('import sys; sys.stderr.write("failed\\nsecond line"); sys.exit(7)', 'exited 7'),
+            ('print("x"*20)', 'output exceeds 10 bytes'),
+        ]
+        for code, reason in cases:
+            with self.subTest(reason=reason):
+                args = ['staged', '--evaluator-command', self.command(code)]
+                if reason.startswith('output'):
+                    args.extend(['--max-evaluator-output-bytes', '10'])
+                self.blocked(self.cli(*args), reason)
+
+    def test_diff_limit_blocks_before_process(self):
+        self.stage('src/a', b'large staged value\n')
+        code = 'from pathlib import Path; Path("evaluator-ran").touch()'
+        self.blocked(self.cli('staged', '--evaluator-command', self.command(code),
+                              '--max-diff-bytes', '1'), 'diff exceeds 1 bytes')
+        self.assertFalse((self.repo / 'evaluator-ran').exists())
+
+    def test_invalid_command_arguments(self):
+        for value in ('not-json', '{}', '[]', '[""]', '[1]'):
+            with self.subTest(value=value):
+                self.assertEqual(self.cli('staged', '--evaluator-command', value).returncode, 2)
+
+    def test_init_persists_evaluator_policy(self):
+        code = 'print(\'{"passed":false,"reason":"hook rejection"}\')'
+        command = self.command(code)
+        result = self.cli('init', '--evaluator-command', command, '--evaluator-timeout', '2',
+                          '--max-diff-bytes', '2000', '--max-evaluator-output-bytes', '200')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        hook = (self.repo / '.git/hooks/pre-commit').read_text()
+        self.assertIn('--evaluator-command', hook)
+        self.stage('src/a')
+        commit = subprocess.run(['git', 'commit', '-qm', 'blocked'], cwd=self.repo,
+                                env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(commit.returncode, 0)
+        self.assertIn('hook rejection', commit.stderr)
 
 
 if __name__ == '__main__':
