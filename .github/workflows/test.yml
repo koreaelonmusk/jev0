@@ -1,10 +1,13 @@
 name: test
 on: [push, pull_request]
+
 permissions:
   contents: read
+
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         python: ['3.9', '3.13']
@@ -14,4 +17,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: python3 -m unittest discover -s tests -v
+      - name: Compile
+        run: python3 -m compileall -q jev0.py tests scripts
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -v
+      - name: CLI smoke
+        run: |
+          python3 jev0.py --version
+          python3 jev0.py workspace
