@@ -263,6 +263,15 @@ class PolicyTests(unittest.TestCase):
         result = self.cli('staged')
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_policy_path_is_repository_relative_from_subdirectory(self):
+        self.write_policy({'schema_version': 1, 'max_lines': 1})
+        self.stage('src/a', b'a\nb\n')
+        result = self.cli(
+            'staged', '--policy', '.jev0.json',
+            cwd=self.repo / 'src'
+        )
+        self.blocked(result, '2 added/deleted')
+
     def test_policy_applies_scope_and_file_budget(self):
         self.write_policy({
             'schema_version': 1,
