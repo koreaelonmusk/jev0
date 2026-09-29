@@ -182,11 +182,16 @@ JSON value to stdout:
 
 The object must contain only `passed` (boolean) and `reason` (string), and exit
 zero. Rejection, timeout, launch failure, nonzero exit, malformed output, excess
-diff size, or excess response size blocks the check. On timeout, jev0 kills the
-evaluator's POSIX process group. As with `jev0 run`, a process that starts another
-session can escape that group. The response-size check occurs after the process
-exits; it is a protocol limit, not a memory sandbox for malicious evaluators.
-Nonzero-exit stderr diagnostics are truncated to the configured response limit.
+diff size, or excess response size blocks the check. On timeout or interruption,
+jev0 kills the evaluator's POSIX process group with bounded cleanup. As with
+`jev0 run`, a process that starts another session can escape that group.
+
+Evaluator stdout/stderr are spooled outside the jev0 process heap before the
+configured response limit is enforced, so large evaluator output cannot force
+jev0 to buffer the entire response in memory. This is still a protocol/resource
+guard, not a sandbox: a malicious evaluator can consume CPU, disk, or create
+detached processes until the timeout or an external sandbox stops it. Nonzero-exit
+stderr diagnostics are truncated to the configured response limit.
 
 Use the same options with `jev0 init` to persist the policy in a new pre-commit
 hook. Commands using repository-relative paths run from the repository root.
