@@ -239,6 +239,81 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(existing.read_text(), 'keep')
 
 
+class DoctorTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        self.env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+        subprocess.run(['git', 'init', '-q'], cwd=self.repo, env=self.env, check=True)
+        subprocess.run(['git', 'config', 'user.email', 'test@example.invalid'],
+                       cwd=self.repo, env=self.env, check=True)
+        subprocess.run(['git', 'config', 'user.name', 'Test'],
+                       cwd=self.repo, env=self.env, check=True)
+
+    def cli(self, *args, cwd=None):
+        return subprocess.run(
+            [sys.executable, str(CLI), *args],
+            cwd=cwd or self.repo,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    def test_doctor_json_reports_runtime_and_repo_state(self):
+        result = self.cli('doctor', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['version'].split('-')[0], '0.3.0')
+        self.assertTrue(data['repository'])
+        self.assertEqual(data['hook_status'], 'missing')
+        self.assertFalse(data['hook_enforced'])
+        self.assertTrue(data['runtime_ready'])
+        self.assertEqual(len(data['executable_sha256']), 64)
+        self.assertEqual(data['executable'], str(CLI.resolve()))
+
+    def test_doctor_reports_managed_hook(self):
+        self.assertEqual(self.cli('init').returncode, 0)
+        result = self.cli('doctor', '--json')
+        data = json.loads(result.stdout)
+        self.assertEqual(data['hook_status'], 'managed')
+        self.assertTrue(data['hook_enforced'])
+
+    def test_doctor_reports_custom_hooks_path_without_mutation(self):
+        subprocess.run(['git', 'config', 'core.hooksPath', '.hooks'],
+                       cwd=self.repo, env=self.env, check=True)
+        before = subprocess.run(['git', 'status', '--porcelain=v1', '-z'],
+                                cwd=self.repo, env=self.env, check=True,
+                                capture_output=True).stdout
+        result = self.cli('doctor', '--json')
+        after = subprocess.run(['git', 'status', '--porcelain=v1', '-z'],
+                               cwd=self.repo, env=self.env, check=True,
+                               capture_output=True).stdout
+        data = json.loads(result.stdout)
+        self.assertEqual(data['hook_status'], 'custom-hooks-path')
+        self.assertFalse(data['hook_enforced'])
+        self.assertEqual(before, after)
+
+    def test_doctor_works_outside_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.cli('doctor', '--json', cwd=directory)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertFalse(data['repository'])
+        self.assertEqual(data['hook_status'], 'not-a-repository')
+        self.assertFalse(data['hook_enforced'])
+
+    def test_doctor_human_output_is_stable_key_value_lines(self):
+        result = self.cli('doctor')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertTrue(any(line.startswith('version: ') for line in lines))
+        self.assertTrue(any(line.startswith('runtime_ready: ') for line in lines))
+        self.assertTrue(any(line.startswith('hook_status: ') for line in lines))
+
+
+
 class EvaluatorTests(unittest.TestCase):
     """Exercise the optional Python API against real staged content."""
 
