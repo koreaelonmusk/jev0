@@ -9,9 +9,12 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 from typing import Optional, Protocol
 
 VERSION = "0.3.0-dev"
+PROCESS_CLEANUP_TIMEOUT = 1.0
+GIT_ERROR_BYTES = 8192
 
 
 class Blocked(Exception):
@@ -47,12 +50,10 @@ class ProcessEvaluator:
         )
         try:
             output, error = process.communicate(payload, timeout=self.timeout)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.communicate()
+        except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
+            terminate_process_group(process)
+            if isinstance(error, KeyboardInterrupt):
+                raise Blocked("Layer 1 evaluator interrupted") from None
             raise Blocked(f"Layer 1 evaluator exceeded {self.timeout:g}s") from None
         if process.returncode:
             detail = error[: self.max_output_bytes].decode(errors="replace").strip()
@@ -74,6 +75,43 @@ class ProcessEvaluator:
         return result["passed"], result["reason"]
 
 
+def close_process_pipes(process):
+    """Close parent-side pipes so escaped descendants cannot keep us waiting for EOF."""
+
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
+def terminate_process_group(process, cleanup_timeout=PROCESS_CLEANUP_TIMEOUT):
+    """Best-effort process-group kill with bounded local cleanup."""
+
+    if process.poll() is None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except (ProcessLookupError, PermissionError):
+            pass
+    close_process_pipes(process)
+    try:
+        process.wait(timeout=cleanup_timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            process.wait(timeout=cleanup_timeout)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def git(*args):
     result = subprocess.run(
         ["git", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -83,6 +121,35 @@ def git(*args):
             "Git operation failed: " + result.stderr.decode(errors="replace").strip()
         )
     return result.stdout
+
+
+def git_limited(max_bytes, *args):
+    """Read at most max_bytes + 1 bytes from Git before rejecting oversized output."""
+
+    with tempfile.TemporaryFile() as error_stream:
+        process = subprocess.Popen(
+            ["git", *args],
+            stdout=subprocess.PIPE,
+            stderr=error_stream,
+            start_new_session=True,
+        )
+        try:
+            output = process.stdout.read(max_bytes + 1)
+            if len(output) > max_bytes:
+                terminate_process_group(process)
+                raise Blocked(f"Layer 1 diff exceeds {max_bytes} bytes")
+            returncode = process.wait()
+        except KeyboardInterrupt:
+            terminate_process_group(process)
+            raise Blocked("Git operation interrupted") from None
+        finally:
+            if process.stdout is not None and not process.stdout.closed:
+                process.stdout.close()
+        if returncode:
+            error_stream.seek(0)
+            detail = error_stream.read(GIT_ERROR_BYTES).decode(errors="replace").strip()
+            raise Blocked("Git operation failed: " + detail)
+        return output
 
 
 def positive(value):
@@ -157,8 +224,8 @@ def mode_label(mode):
     return "staged" if mode == "staged" else "workspace"
 
 
-def unified_diff(mode):
-    return git(
+def unified_diff(mode, max_bytes=None):
+    args = (
         *diff_prefix(mode),
         "--no-ext-diff",
         "--no-textconv",
@@ -166,7 +233,15 @@ def unified_diff(mode):
         "--no-color",
         "--patch",
         "--",
-    ).decode("utf-8", errors="replace")
+    )
+    output = git(*args) if max_bytes is None else git_limited(max_bytes, *args)
+    return output.decode("utf-8", errors="replace")
+
+
+def evaluator_diff(mode, evaluator):
+    if isinstance(evaluator, ProcessEvaluator):
+        return unified_diff(mode, evaluator.max_diff_bytes)
+    return unified_diff(mode)
 
 
 def run_evaluator(evaluator, diff_text):
@@ -191,13 +266,13 @@ def run_evaluator(evaluator, diff_text):
 def staged(args, evaluator: Optional[GuardEvaluator] = None):
     heuristic_rules(args, "staged")
     if evaluator is not None:
-        run_evaluator(evaluator, unified_diff("staged"))
+        run_evaluator(evaluator, evaluator_diff("staged", evaluator))
 
 
 def workspace(args, evaluator: Optional[GuardEvaluator] = None):
     heuristic_rules(args, "workspace")
     if evaluator is not None:
-        run_evaluator(evaluator, unified_diff("workspace"))
+        run_evaluator(evaluator, evaluator_diff("workspace", evaluator))
 
 
 def heuristic_rules(args, mode):
@@ -331,11 +406,7 @@ def run(args):
     try:
         returncode = process.wait(timeout=args.timeout)
     except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
+        terminate_process_group(process)
         if isinstance(error, KeyboardInterrupt):
             raise Blocked("command interrupted") from None
         raise Blocked(
