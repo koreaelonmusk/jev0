@@ -57,10 +57,9 @@ class ProcessEvaluator:
                     raise Blocked("Layer 1 evaluator interrupted") from None
                 raise Blocked(f"Layer 1 evaluator exceeded {self.timeout:g}s") from None
 
-            # A well-behaved evaluator waits for its children. Kill any same-group
-            # leftovers after the leader exits so they cannot leak past evaluation.
-            terminate_process_group(process)
-
+            # stdout/stderr are regular temporary files, so evaluator descendants
+            # cannot keep this parent waiting for pipe EOF after the leader exits.
+            # Avoid killpg() on normal completion because the leader PID may be reused.
             output_stream.seek(0)
             output = output_stream.read(self.max_output_bytes + 1)
             if len(output) > self.max_output_bytes:
