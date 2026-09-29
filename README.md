@@ -173,6 +173,35 @@ an executable jev0-managed pre-commit hook. When a hook was created from a polic
 manifest, `hook_policy_sha256` records the manifest fingerprint captured at
 initialization time. A true enforcement value is not a sandbox claim.
 
+## Server-side range guard
+
+Use `range` in CI to validate the full pull-request change set instead of only a
+developer's staged or working-tree state:
+
+```sh
+jev0 range <base-ref> <head-ref> --policy .jev0.json
+```
+
+jev0 resolves both refs to commit IDs first, then evaluates the merge-base diff
+(`base...head`) with the same Layer 0 rules used locally. This matches pull-request
+semantics: unrelated commits added to the base branch after the feature branch was
+created are not charged to the feature.
+
+The command accepts the same explicit policy and optional Layer 1 evaluator flags
+as `staged` and `workspace`. It does not fetch missing refs. CI must check out or
+fetch the base/head commits before calling it. Ref strings are resolved before
+being used in a diff so option-like user input is not passed directly to
+`git diff`.
+
+Example GitHub Actions usage after fetching the base commit:
+
+```sh
+jev0 range "$BASE_SHA" "$HEAD_SHA" --policy .jev0.json
+```
+
+This is the server-enforced companion to the local hook: skipping `pre-commit`
+does not bypass a required CI range check.
+
 ## Universal workflow
 
 A practical tool-agnostic loop is:
