@@ -209,8 +209,14 @@ latency, and resource consumption require separate measurement.
 available. To change hook settings or uninstall, inspect `.git/hooks/pre-commit`
 (or the path reported by `git rev-parse --git-path hooks/pre-commit`) and remove
 only the hook marked `# jev0 managed pre-commit hook`. Then rerun `init` if needed.
-For updates, review and remove the installed `$HOME/.local/bin/jev0` before
-running `install.sh` again. `JEV0_BIN_DIR` selects another installation directory.
+If the managed hook content is unchanged but its execute bit was lost, `jev0 init`
+repairs that permission without replacing the file.
+
+The installer creates a new executable atomically and never overwrites different
+existing content or symlinks. Re-running it with identical jev0 content is safe and
+repairs a missing execute bit. For an actual version update, review and remove the
+installed `$HOME/.local/bin/jev0` before running `install.sh` again.
+`JEV0_BIN_DIR` selects another installation directory.
 
 `.gitignore` prevents accidental additions, not `git add -f` or previously tracked
 files. The staged check is the additional gate. Broad `*.bin` exclusion is
