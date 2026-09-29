@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -279,6 +280,25 @@ class DoctorTests(unittest.TestCase):
         data = json.loads(result.stdout)
         self.assertEqual(data['hook_status'], 'managed')
         self.assertTrue(data['hook_enforced'])
+        self.assertTrue(data['hook_target_exists'])
+        self.assertTrue(data['hook_matches_executable'])
+        self.assertEqual(data['hook_target'], str(CLI.resolve()))
+        self.assertEqual(data['hook_python'], sys.executable)
+
+    def test_doctor_detects_stale_managed_hook_target(self):
+        self.assertEqual(self.cli('init').returncode, 0)
+        hook = self.repo / '.git/hooks/pre-commit'
+        lines = hook.read_text().splitlines()
+        command = shlex.split(next(line for line in lines if line.startswith('exec ')))
+        command[2] = str(self.repo / 'missing-jev0')
+        hook.write_text('\n'.join(lines[:2] + ['exec ' + shlex.join(command[1:])]) + '\n')
+        hook.chmod(0o755)
+        result = self.cli('doctor', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['hook_status'], 'managed-stale')
+        self.assertFalse(data['hook_enforced'])
+        self.assertFalse(data['hook_target_exists'])
 
     def test_doctor_reports_custom_hooks_path_without_mutation(self):
         subprocess.run(['git', 'config', 'core.hooksPath', '.hooks'],
