@@ -266,6 +266,7 @@ class DoctorTests(unittest.TestCase):
         result = self.cli('doctor', '--json')
         self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout)
+        self.assertEqual(data['schema_version'], 1)
         self.assertEqual(data['version'].split('-')[0], '0.3.0')
         self.assertTrue(data['repository'])
         self.assertEqual(data['hook_status'], 'missing')
@@ -299,6 +300,20 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(data['hook_status'], 'managed-stale')
         self.assertFalse(data['hook_enforced'])
         self.assertFalse(data['hook_target_exists'])
+
+    def test_doctor_rejects_oversized_hook_without_reading_it_all(self):
+        hook = self.repo / '.git/hooks/pre-commit'
+        hook.write_bytes(
+            b'#!/bin/sh\n# jev0 managed pre-commit hook\n' +
+            b'x' * 20000
+        )
+        hook.chmod(0o755)
+        result = self.cli('doctor', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['hook_status'], 'oversized')
+        self.assertFalse(data['hook_enforced'])
+
 
     def test_doctor_reports_custom_hooks_path_without_mutation(self):
         subprocess.run(['git', 'config', 'core.hooksPath', '.hooks'],
