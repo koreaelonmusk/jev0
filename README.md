@@ -90,9 +90,11 @@ jev0 init --policy .jev0.json
 ```
 
 Policy loading is deliberately **explicit**. jev0 never auto-discovers
-`.jev0.json` or another repository file. The manifest is bounded to 64 KiB,
-must resolve to a file inside the repository, rejects unknown keys, and currently
-permits only `schema_version`, `max_files`, `max_lines`, and `allow`.
+`.jev0.json` or another repository file. Relative policy paths are resolved from
+the repository root, so agent working-directory changes cannot select a different
+policy accidentally. The manifest is bounded to 64 KiB, must resolve to a file
+inside the repository, rejects unknown or duplicate keys, and currently permits
+only `schema_version`, `max_files`, `max_lines`, and `allow`.
 Evaluator commands are never loaded from repository policy files.
 
 `--policy` cannot be combined with `--max-files`, `--max-lines`, or
