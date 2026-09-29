@@ -895,6 +895,100 @@ class RangeEvidenceTests(unittest.TestCase):
                 jev0.inspect_change_set(jev0.range_diff_prefix(base, head))
 
 
+class EvidenceVerifyTests(unittest.TestCase):
+    setUp = GuardTests.setUp
+    git = GuardTests.git
+    cli = GuardTests.cli
+
+    def commit_file(self, name, data, message):
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        self.git('add', '-f', '--', name)
+        self.git('commit', '-qm', message)
+        return self.git('rev-parse', 'HEAD').decode().strip()
+
+    def make_evidence(self):
+        base = self.commit_file('base.txt', b'base\n', 'base')
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        report = self.cli('range-report', base, head)
+        self.assertEqual(report.returncode, 0, report.stderr)
+        path = self.repo / 'evidence.json'
+        path.write_text(report.stdout)
+        return path, json.loads(report.stdout)
+
+    def test_evidence_verify_accepts_valid_report(self):
+        path, evidence = self.make_evidence()
+        result = self.cli('evidence-verify', str(path), '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data['valid'])
+        self.assertEqual(data['evidence_sha256'], evidence['evidence_sha256'])
+        self.assertTrue(data['current_verifier_match'])
+
+    def test_evidence_verify_require_current_verifier(self):
+        path, _ = self.make_evidence()
+        result = self.cli(
+            'evidence-verify',
+            str(path),
+            '--require-current-verifier',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('current_verifier_match: yes', result.stdout)
+
+    def test_evidence_verify_rejects_tampering(self):
+        path, evidence = self.make_evidence()
+        evidence['decision'] = 'block'
+        evidence['reason'] = 'tampered'
+        path.write_text(json.dumps(evidence))
+        result = self.cli('evidence-verify', str(path))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('evidence digest mismatch', result.stderr)
+
+    def test_evidence_verify_rejects_unknown_keys(self):
+        path, evidence = self.make_evidence()
+        evidence['unexpected'] = True
+        path.write_text(json.dumps(evidence))
+        result = self.cli('evidence-verify', str(path))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('evidence keys mismatch', result.stderr)
+
+    def test_evidence_verify_bounds_input_size(self):
+        path = self.repo / 'evidence.json'
+        with path.open('wb') as stream:
+            stream.seek(1_048_576)
+            stream.write(b'x')
+        result = self.cli('evidence-verify', str(path))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('evidence exceeds 1048576 bytes', result.stderr)
+
+    def test_evidence_verify_detects_different_but_valid_verifier(self):
+        path, evidence = self.make_evidence()
+        evidence['verifier_sha256'] = '0' * 64
+        unsigned = dict(evidence)
+        unsigned.pop('evidence_sha256')
+        canonical = json.dumps(
+            unsigned, sort_keys=True, separators=(',', ':'), ensure_ascii=False
+        ).encode('utf-8')
+        evidence['evidence_sha256'] = hashlib.sha256(canonical).hexdigest()
+        path.write_text(json.dumps(evidence))
+
+        relaxed = self.cli('evidence-verify', str(path), '--json')
+        self.assertEqual(relaxed.returncode, 0, relaxed.stderr)
+        self.assertFalse(json.loads(relaxed.stdout)['current_verifier_match'])
+
+        strict = self.cli(
+            'evidence-verify',
+            str(path),
+            '--require-current-verifier',
+        )
+        self.assertEqual(strict.returncode, 1)
+        self.assertIn(
+            'evidence verifier does not match current jev0',
+            strict.stderr,
+        )
+
+
 class DoctorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
