@@ -113,6 +113,21 @@ Recreate the managed hook deliberately when adopting a new policy.
 
 See [examples/policy.json](examples/policy.json) for a copyable manifest.
 
+### Detect policy drift
+
+After installing a managed hook from a manifest, verify that the current manifest
+still matches both the recorded fingerprint and the hook's actual Layer 0 arguments:
+
+```sh
+jev0 policy-check .jev0.json
+jev0 policy-check .jev0.json --json
+```
+
+Exit **0** means the manifest, snapshot fingerprint, and enforced
+`max_files/max_lines/allow` values are all in sync. Exit **1** reports drift,
+including a changed manifest, a missing fingerprint, a missing/stale hook, or
+manual hook argument tampering. This command is read-only and is suitable for CI.
+
 ## What this actually guarantees
 
 The deterministic guard itself uses **zero LLM tokens**. It does not guarantee zero
