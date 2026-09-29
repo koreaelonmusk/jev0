@@ -104,9 +104,12 @@ def capture_process_output(process, timeout, max_output_bytes):
             if returncode is not None:
                 wait = 0
             else:
-                wait = deadline - time.monotonic()
-                if wait <= 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     raise subprocess.TimeoutExpired(process.args, timeout)
+                # Re-check leader exit frequently. A detached descendant may keep
+                # inherited pipe fds open without producing data.
+                wait = min(remaining, 0.05)
 
             events = selector.select(wait)
             if not events:
