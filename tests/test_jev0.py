@@ -308,6 +308,22 @@ class PolicyTests(unittest.TestCase):
             'policy exceeds 65536 bytes',
         )
 
+    def test_policy_rejects_duplicate_keys(self):
+        (self.repo / '.jev0.json').write_text(
+            '{"schema_version":1,"max_files":2,"max_files":3}'
+        )
+        self.blocked(
+            self.cli('staged', '--policy', '.jev0.json'),
+            'duplicate policy key: max_files',
+        )
+
+    def test_policy_rejects_invalid_utf8(self):
+        (self.repo / '.jev0.json').write_bytes(b'{"schema_version":1}\xff')
+        self.blocked(
+            self.cli('staged', '--policy', '.jev0.json'),
+            'policy must be valid UTF-8 JSON',
+        )
+
     def test_policy_and_layer_zero_flags_cannot_be_mixed(self):
         self.write_policy({'schema_version': 1})
         cases = [
