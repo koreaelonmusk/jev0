@@ -291,6 +291,7 @@ def doctor_repository_state():
             "hook_target": None,
             "hook_target_exists": False,
             "hook_matches_executable": False,
+            "hook_policy_sha256": None,
         }
 
     if root_result.returncode:
@@ -303,6 +304,7 @@ def doctor_repository_state():
             "hook_target": None,
             "hook_target_exists": False,
             "hook_matches_executable": False,
+            "hook_policy_sha256": None,
         }
 
     root = os.fsdecode(root_result.stdout.rstrip(b"\n"))
@@ -322,6 +324,7 @@ def doctor_repository_state():
             "hook_target": None,
             "hook_target_exists": False,
             "hook_matches_executable": False,
+            "hook_policy_sha256": None,
         }
     if custom.returncode != 1:
         return {
@@ -333,6 +336,7 @@ def doctor_repository_state():
             "hook_target": None,
             "hook_target_exists": False,
             "hook_matches_executable": False,
+            "hook_policy_sha256": None,
         }
 
     hook_result = subprocess.run(
@@ -351,6 +355,7 @@ def doctor_repository_state():
             "hook_target": None,
             "hook_target_exists": False,
             "hook_matches_executable": False,
+            "hook_policy_sha256": None,
         }
 
     hook = Path(os.fsdecode(hook_result.stdout.rstrip(b"\n")))
@@ -368,6 +373,7 @@ def doctor_repository_state():
             "hook_target": None,
             "hook_target_exists": False,
             "hook_matches_executable": False,
+            "hook_policy_sha256": None,
         }
     if not hook.exists():
         return {
@@ -379,6 +385,7 @@ def doctor_repository_state():
             "hook_target": None,
             "hook_target_exists": False,
             "hook_matches_executable": False,
+            "hook_policy_sha256": None,
         }
 
     try:
@@ -394,6 +401,7 @@ def doctor_repository_state():
                 "hook_target": None,
                 "hook_target_exists": False,
                 "hook_matches_executable": False,
+            "hook_policy_sha256": None,
             }
         hook_text = hook_prefix.decode(errors="replace")
         first_lines = hook_text.splitlines()[:2]
@@ -407,9 +415,25 @@ def doctor_repository_state():
             "hook_target": None,
             "hook_target_exists": False,
             "hook_matches_executable": False,
+            "hook_policy_sha256": None,
         }
 
     managed = "# jev0 managed pre-commit hook" in first_lines
+    policy_prefix = "# jev0 policy sha256: "
+    policy_fingerprint = next(
+        (
+            line[len(policy_prefix):]
+            for line in hook_text.splitlines()
+            if line.startswith(policy_prefix)
+        ),
+        None,
+    )
+    if policy_fingerprint is not None:
+        if (
+            len(policy_fingerprint) != 64
+            or any(ch not in "0123456789abcdef" for ch in policy_fingerprint)
+        ):
+            policy_fingerprint = None
     executable = os.access(hook, os.X_OK)
     state = {
         "repository": True,
@@ -420,7 +444,9 @@ def doctor_repository_state():
         "hook_target": None,
         "hook_target_exists": False,
         "hook_matches_executable": False,
+        "hook_policy_sha256": None,
     }
+    state["hook_policy_sha256"] = policy_fingerprint
     if not managed:
         return state
     if not executable:
@@ -503,6 +529,7 @@ def doctor(args):
             "hook_target",
             "hook_target_exists",
             "hook_matches_executable",
+            "hook_policy_sha256",
             "hook_enforced",
         )
         for key in ordered:
@@ -611,6 +638,29 @@ def resolve_guard_settings(args):
         max_lines=DEFAULT_MAX_LINES if max_lines is None else max_lines,
         allow=[] if allow is None else allow,
     ), None, root
+
+
+def inspect_policy(args):
+    root = repository_root()
+    settings, resolved = load_policy(args.path, root)
+    state = {
+        "schema_version": POLICY_SCHEMA_VERSION,
+        "policy_path": str(resolved),
+        "policy_sha256": file_sha256(resolved, POLICY_MAX_BYTES),
+        "max_files": settings.max_files,
+        "max_lines": settings.max_lines,
+        "allow": settings.allow,
+    }
+    if args.json:
+        print(json.dumps(state, sort_keys=True, separators=(",", ":")))
+    else:
+        print(f"schema_version: {state['schema_version']}")
+        print(f"policy_path: {state['policy_path']}")
+        print(f"policy_sha256: {state['policy_sha256']}")
+        print(f"max_files: {state['max_files']}")
+        print(f"max_lines: {state['max_lines']}")
+        print("allow: " + (", ".join(state["allow"]) if state["allow"] else "(all paths)"))
+    return 0
 
 
 def positive(value):
@@ -857,7 +907,7 @@ def ensure_managed_hook(hook, content):
 
 
 def init(args):
-    settings, _, root = resolve_guard_settings(args)
+    settings, policy_file, root = resolve_guard_settings(args)
     custom = subprocess.run(
         ["git", "config", "--get", "core.hooksPath"],
         stdout=subprocess.PIPE,
@@ -897,8 +947,17 @@ def init(args):
                 str(args.max_evaluator_output_bytes),
             ]
         )
+    policy_comment = ""
+    if policy_file is not None:
+        policy_comment = (
+            "# jev0 policy sha256: "
+            + file_sha256(policy_file, POLICY_MAX_BYTES)
+            + "\n"
+        )
     content = (
-        "#!/bin/sh\n# jev0 managed pre-commit hook\nexec "
+        "#!/bin/sh\n# jev0 managed pre-commit hook\n"
+        + policy_comment
+        + "exec "
         + shlex.join(command)
         + "\n"
     )
@@ -963,6 +1022,9 @@ def main():
     item.add_argument("command", nargs=argparse.REMAINDER)
     item = sub.add_parser("doctor")
     item.add_argument("--json", action="store_true")
+    item = sub.add_parser("policy")
+    item.add_argument("path", type=policy_argument)
+    item.add_argument("--json", action="store_true")
     args = parser.parse_args()
     if args.action in ("staged", "workspace", "init") and args.policy is not None:
         if args.max_files is not None or args.max_lines is not None or args.allow:
@@ -973,7 +1035,12 @@ def main():
             return {"staged": staged, "workspace": workspace}[args.action](
                 args, evaluator
             ) or 0
-        return {"init": init, "run": run, "doctor": doctor}[args.action](args) or 0
+        return {
+            "init": init,
+            "run": run,
+            "doctor": doctor,
+            "policy": inspect_policy,
+        }[args.action](args) or 0
     except (Blocked, OSError, ValueError) as error:
         print("jev0: " + " ".join(str(error).splitlines()), file=sys.stderr)
         return 1
