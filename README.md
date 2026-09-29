@@ -25,9 +25,12 @@ jev0 init
 those cases. Run `init` again with the same arguments safely. No shell profiles,
 agent instructions, or global Git settings are edited.
 
-## Three commands
+## Four commands
 
 ```sh
+# Check all tracked changes against HEAD, including unstaged edits.
+jev0 workspace
+
 # Check the index, including forcibly staged ignored files.
 jev0 staged
 
@@ -55,16 +58,20 @@ binary/model is allowed. Git's diff configuration and attributes affect text
 counts and binary classification. Budgets are review policies, not semantic
 proof that a change is necessary or correct.
 
-`staged` succeeds silently with exit **0**, or blocks with exit **1** and one
+`workspace` checks tracked working-tree state against HEAD and blocks if untracked
+files exist until they are explicitly staged for review. `staged` checks only the
+Git index. Both succeed silently with exit **0**, or block with exit **1** and one
 stderr line. Files and index entries are never rolled back or discarded.
 `run` forwards output and the command's exit status; timeout or launch failure
 returns **1**. Invalid CLI arguments return **2**.
 
 ## What this actually guarantees
 
-The guard itself uses **zero LLM tokens**. It does not guarantee zero agent token
-spend. A pre-commit hook runs after editing and staging; it cannot prevent earlier
-API calls. Agents need not commit, and hooks can be skipped with `--no-verify`.
+The deterministic guard itself uses **zero LLM tokens**. It does not guarantee zero
+agent token spend. A pre-commit hook runs after editing and staging; it cannot
+prevent earlier API calls. `jev0 workspace` can be invoked before completion to
+cover tracked edits that were never staged, but invocation is still advisory unless
+an external system enforces it. Hooks can also be skipped with `--no-verify`.
 
 `run` is an explicit timeout wrapper, **not an OS interceptor or sandbox**. It
 executes the command you provide without shell expansion. It does not classify
@@ -87,6 +94,25 @@ You can add this to the instruction file your agent actually reads:
 
 Cursor, Claude Code, Codex, and Windsurf can use this CLI wherever they can run
 local commands. Automatic interception in these tools has not been tested.
+See [docs/UNIVERSAL.md](docs/UNIVERSAL.md) for the vendor-neutral integration contract.
+
+## Universal workflow
+
+A practical tool-agnostic loop is:
+
+```sh
+# after an agent edits files
+jev0 workspace
+
+# before commit
+jev0 staged
+
+# for bounded test/build commands
+jev0 run --timeout 120 -- python3 -m unittest discover -s tests -v
+```
+
+This gives one stable CLI contract across terminal-capable coding agents without
+pretending every vendor exposes the same plugin or hook API.
 
 ## Verify and measure
 
