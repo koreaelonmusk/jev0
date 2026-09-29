@@ -796,6 +796,14 @@ def scope(value):
     return path
 
 
+def commit_ref_argument(value):
+    if not value or value.startswith("-") or "\0" in value or "\n" in value or "\r" in value:
+        raise argparse.ArgumentTypeError(
+            "commit ref must be a non-empty single-line non-option string"
+        )
+    return value
+
+
 def policy_argument(value):
     if not value:
         raise argparse.ArgumentTypeError("policy path must not be empty")
@@ -1174,8 +1182,8 @@ def main():
     for name in ("staged", "workspace", "init"):
         add_guard_arguments(sub.add_parser(name))
     item = sub.add_parser("range")
-    item.add_argument("base")
-    item.add_argument("head")
+    item.add_argument("base", type=commit_ref_argument)
+    item.add_argument("head", type=commit_ref_argument)
     add_guard_arguments(item)
     item = sub.add_parser("run")
     item.add_argument("--timeout", type=duration, required=True)
