@@ -1195,6 +1195,29 @@ def evidence_verify(args):
         raise Blocked("evidence decision must be allow or block")
     if evidence["reason"] is not None and not isinstance(evidence["reason"], str):
         raise Blocked("evidence reason must be null or a string")
+    if evidence["decision"] == "allow" and evidence["reason"] is not None:
+        raise Blocked("allow evidence must not contain a block reason")
+    if evidence["decision"] == "block" and (
+        not isinstance(evidence["reason"], str) or not evidence["reason"].strip()
+    ):
+        raise Blocked("block evidence must contain a non-empty reason")
+    if evidence["policy_source"] not in ("flags", "worktree", "base"):
+        raise Blocked("evidence policy_source is invalid")
+    if evidence["policy_source"] == "flags":
+        if evidence["policy_path"] is not None or evidence["policy_sha256"] is not None:
+            raise Blocked("flag policy evidence must not contain policy file provenance")
+    else:
+        if not isinstance(evidence["policy_path"], str) or not evidence["policy_path"]:
+            raise Blocked("file policy evidence must contain policy_path")
+        value = evidence["policy_sha256"]
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(ch not in "0123456789abcdef" for ch in value)
+        ):
+            raise Blocked("file policy evidence must contain policy_sha256")
+    if not isinstance(evidence["verifier_version"], str) or not evidence["verifier_version"]:
+        raise Blocked("evidence verifier_version must be a non-empty string")
     for key in ("base_sha", "head_sha", "merge_base_sha"):
         value = evidence[key]
         if (
@@ -1236,6 +1259,8 @@ def evidence_verify(args):
         raise Blocked(f"evidence paths exceed {EVIDENCE_MAX_PATHS} entries")
     if evidence["paths_total"] < len(evidence["paths"]):
         raise Blocked("evidence paths_total cannot be smaller than paths length")
+    if evidence["files_changed"] != evidence["paths_total"]:
+        raise Blocked("evidence files_changed must equal paths_total")
     if evidence["paths_truncated"] != (evidence["paths_total"] > len(evidence["paths"])):
         raise Blocked("evidence paths_truncated is inconsistent with paths_total")
 
