@@ -196,8 +196,19 @@ being used in a diff so option-like user input is not passed directly to
 Example GitHub Actions usage after fetching the base commit:
 
 ```sh
-jev0 range "$BASE_SHA" "$HEAD_SHA" --policy .jev0.json
+jev0 range "$BASE_SHA" "$HEAD_SHA" --base-policy .github/jev0-policy.json
 ```
+
+For server enforcement, prefer `--base-policy` over `--policy`. The policy blob
+is read from the already-resolved base commit, not from the pull-request head.
+That prevents a PR from weakening its own limits and then using those weaker
+limits to approve itself. Base-policy reads are bounded to 64 KiB and fail closed
+when the file is missing, invalid, oversized, or outside the supported schema.
+
+This repository's workflow also exposes one stable aggregate check named
+`jev0 gate`. After the feature is merged, configure the main-branch ruleset to
+require `jev0 gate`; the gate succeeds only when the full macOS/Linux × Python
+matrix succeeds.
 
 This is the server-enforced companion to the local hook: skipping `pre-commit`
 does not bypass a required CI range check.
