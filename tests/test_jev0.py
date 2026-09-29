@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -127,6 +128,20 @@ class GuardTests(unittest.TestCase):
         self.assertIn(b'model artifact', result.stderr)
         self.assertEqual((self.repo / 'weights.gguf').read_bytes(), b'x\n')
 
+    def test_init_repairs_managed_hook_execute_bit(self):
+        self.assertEqual(self.cli('init').returncode, 0)
+        hook = self.repo / '.git/hooks/pre-commit'
+        hook.chmod(0o644)
+        result = self.cli('init')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(os.access(hook, os.X_OK))
+        self.assertIn('repaired pre-commit hook', result.stderr)
+
+    def test_init_leaves_no_temporary_hook_files(self):
+        self.assertEqual(self.cli('init').returncode, 0)
+        hooks = self.repo / '.git/hooks'
+        self.assertEqual(list(hooks.glob('.jev0-pre-commit-*')), [])
+
     def test_existing_hook_preserved(self):
         hook = self.repo / '.git/hooks/pre-commit'
         hook.write_text('#!/bin/sh\nexit 0\n')
@@ -192,6 +207,165 @@ class GuardTests(unittest.TestCase):
         (target / 'jev0').write_text('keep')
         self.assertEqual(install().returncode, 1)
         self.assertEqual((target / 'jev0').read_text(), 'keep')
+
+    def test_installer_repairs_execute_bit_for_identical_binary(self):
+        target = self.repo / 'bin'
+        env = dict(self.env, JEV0_BIN_DIR=str(target))
+        install = lambda: subprocess.run(
+            ['sh', str(ROOT / 'install.sh')], env=env, capture_output=True
+        )
+        self.assertEqual(install().returncode, 0)
+        binary = target / 'jev0'
+        binary.chmod(0o644)
+        self.assertEqual(install().returncode, 0)
+        self.assertTrue(os.access(binary, os.X_OK))
+
+    def test_installer_leaves_no_temporary_files(self):
+        target = self.repo / 'bin'
+        env = dict(self.env, JEV0_BIN_DIR=str(target))
+        result = subprocess.run(['sh', str(ROOT / 'install.sh')], env=env, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list(target.glob('.jev0-install.*')), [])
+
+    def test_installer_preserves_symlink_destination(self):
+        target = self.repo / 'bin'
+        target.mkdir()
+        existing = self.repo / 'existing'
+        existing.write_text('keep')
+        (target / 'jev0').symlink_to(existing)
+        env = dict(self.env, JEV0_BIN_DIR=str(target))
+        result = subprocess.run(['sh', str(ROOT / 'install.sh')], env=env, capture_output=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue((target / 'jev0').is_symlink())
+        self.assertEqual(existing.read_text(), 'keep')
+
+
+class DoctorTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        self.env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+        subprocess.run(['git', 'init', '-q'], cwd=self.repo, env=self.env, check=True)
+        subprocess.run(['git', 'config', 'user.email', 'test@example.invalid'],
+                       cwd=self.repo, env=self.env, check=True)
+        subprocess.run(['git', 'config', 'user.name', 'Test'],
+                       cwd=self.repo, env=self.env, check=True)
+
+    def cli(self, *args, cwd=None):
+        return subprocess.run(
+            [sys.executable, str(CLI), *args],
+            cwd=cwd or self.repo,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    def test_doctor_json_reports_runtime_and_repo_state(self):
+        result = self.cli('doctor', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['schema_version'], 1)
+        self.assertEqual(data['version'].split('-')[0], '0.3.0')
+        self.assertTrue(data['repository'])
+        self.assertEqual(data['hook_status'], 'missing')
+        self.assertFalse(data['hook_enforced'])
+        self.assertTrue(data['runtime_ready'])
+        self.assertEqual(len(data['executable_sha256']), 64)
+        self.assertEqual(data['executable'], str(CLI.resolve()))
+
+    def test_doctor_reports_managed_hook(self):
+        self.assertEqual(self.cli('init').returncode, 0)
+        result = self.cli('doctor', '--json')
+        data = json.loads(result.stdout)
+        self.assertEqual(data['hook_status'], 'managed')
+        self.assertTrue(data['hook_enforced'])
+        self.assertTrue(data['hook_target_exists'])
+        self.assertTrue(data['hook_matches_executable'])
+        self.assertEqual(data['hook_target'], str(CLI.resolve()))
+        self.assertEqual(data['hook_python'], sys.executable)
+
+    def test_doctor_detects_stale_managed_hook_target(self):
+        self.assertEqual(self.cli('init').returncode, 0)
+        hook = self.repo / '.git/hooks/pre-commit'
+        lines = hook.read_text().splitlines()
+        command = shlex.split(next(line for line in lines if line.startswith('exec ')))
+        command[2] = str(self.repo / 'missing-jev0')
+        hook.write_text('\n'.join(lines[:2] + ['exec ' + shlex.join(command[1:])]) + '\n')
+        hook.chmod(0o755)
+        result = self.cli('doctor', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['hook_status'], 'managed-stale')
+        self.assertFalse(data['hook_enforced'])
+        self.assertFalse(data['hook_target_exists'])
+
+    def test_doctor_rejects_oversized_hook_without_reading_it_all(self):
+        hook = self.repo / '.git/hooks/pre-commit'
+        hook.write_bytes(
+            b'#!/bin/sh\n# jev0 managed pre-commit hook\n' +
+            b'x' * 20000
+        )
+        hook.chmod(0o755)
+        result = self.cli('doctor', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['hook_status'], 'oversized')
+        self.assertFalse(data['hook_enforced'])
+
+    def test_doctor_survives_oversized_hook_target(self):
+        self.assertEqual(self.cli('init').returncode, 0)
+        hook = self.repo / '.git/hooks/pre-commit'
+        target = self.repo / 'huge-jev0'
+        with target.open('wb') as stream:
+            stream.seek(10_000_000)
+            stream.write(b'x')
+        lines = hook.read_text().splitlines()
+        command = shlex.split(next(line for line in lines if line.startswith('exec ')))
+        command[2] = str(target)
+        hook.write_text('\n'.join(lines[:2] + ['exec ' + shlex.join(command[1:])]) + '\n')
+        hook.chmod(0o755)
+        result = self.cli('doctor', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data['hook_target_exists'])
+        self.assertFalse(data['hook_matches_executable'])
+        self.assertTrue(data['hook_enforced'])
+
+
+    def test_doctor_reports_custom_hooks_path_without_mutation(self):
+        subprocess.run(['git', 'config', 'core.hooksPath', '.hooks'],
+                       cwd=self.repo, env=self.env, check=True)
+        before = subprocess.run(['git', 'status', '--porcelain=v1', '-z'],
+                                cwd=self.repo, env=self.env, check=True,
+                                capture_output=True).stdout
+        result = self.cli('doctor', '--json')
+        after = subprocess.run(['git', 'status', '--porcelain=v1', '-z'],
+                               cwd=self.repo, env=self.env, check=True,
+                               capture_output=True).stdout
+        data = json.loads(result.stdout)
+        self.assertEqual(data['hook_status'], 'custom-hooks-path')
+        self.assertFalse(data['hook_enforced'])
+        self.assertEqual(before, after)
+
+    def test_doctor_works_outside_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.cli('doctor', '--json', cwd=directory)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertFalse(data['repository'])
+        self.assertEqual(data['hook_status'], 'not-a-repository')
+        self.assertFalse(data['hook_enforced'])
+
+    def test_doctor_human_output_is_stable_key_value_lines(self):
+        result = self.cli('doctor')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertTrue(any(line.startswith('version: ') for line in lines))
+        self.assertTrue(any(line.startswith('runtime_ready: ') for line in lines))
+        self.assertTrue(any(line.startswith('hook_status: ') for line in lines))
+
 
 
 class EvaluatorTests(unittest.TestCase):
@@ -332,6 +506,88 @@ class ProcessEvaluatorTests(unittest.TestCase):
         time.sleep(1.1)
         self.assertFalse((self.repo / 'escaped-evaluator').exists())
 
+    def test_timeout_does_not_wait_for_escaped_pipe_holder(self):
+        self.stage('src/a')
+        code = (
+            'import subprocess,sys,time; '
+            'subprocess.Popen([sys.executable,"-c","import time; time.sleep(2)"], '
+            'start_new_session=True); '
+            'time.sleep(20)'
+        )
+        started = time.monotonic()
+        result = self.cli('staged', '--evaluator-command', self.command(code),
+                          '--evaluator-timeout', '0.2')
+        elapsed = time.monotonic() - started
+        self.blocked(result, 'evaluator exceeded 0.2s')
+        self.assertLess(elapsed, 1.5, f'evaluator cleanup took {elapsed:.2f}s')
+
+    def test_success_does_not_wait_for_detached_child_holding_output_fd(self):
+        self.stage('src/a')
+        code = (
+            'import json,subprocess,sys,time; '
+            'subprocess.Popen([sys.executable,"-c","import time; time.sleep(2)"], '
+            'start_new_session=True); '
+            'print(json.dumps({"passed":True,"reason":""}))'
+        )
+        started = time.monotonic()
+        result = self.cli('staged', '--evaluator-command', self.command(code),
+                          '--evaluator-timeout', '1')
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(elapsed, 1.5, f'evaluator completion took {elapsed:.2f}s')
+
+    def test_large_stdout_is_rejected_without_returning_it(self):
+        self.stage('src/a')
+        code = 'import sys; sys.stdout.write("x"*1000000)'
+        result = self.cli('staged', '--evaluator-command', self.command(code),
+                          '--max-evaluator-output-bytes', '128')
+        self.blocked(result, 'output exceeds 128 bytes')
+        self.assertEqual(result.stdout, '')
+
+    def test_large_stderr_is_truncated_on_nonzero_exit(self):
+        self.stage('src/a')
+        code = 'import sys; sys.stderr.write("e"*1000000); sys.exit(7)'
+        result = self.cli('staged', '--evaluator-command', self.command(code),
+                          '--max-evaluator-output-bytes', '128')
+        self.blocked(result, 'evaluator exited 7')
+        self.assertLess(len(result.stderr), 300)
+
+    def test_unsupported_platform_blocks_before_evaluator_launch(self):
+        import jev0
+        from unittest.mock import patch
+
+        evaluator = jev0.ProcessEvaluator(['never-runs'], 1, 100, 100)
+        with patch.object(jev0.os, 'name', 'nt'), \
+             patch.object(jev0.subprocess, 'Popen') as popen:
+            with self.assertRaisesRegex(jev0.Blocked, 'require macOS or Linux'):
+                evaluator.evaluate('diff')
+        popen.assert_not_called()
+
+    def test_keyboard_interrupt_cleans_evaluator(self):
+        import jev0
+        from unittest.mock import Mock, patch
+
+        process = Mock()
+        process.pid = 424242
+        evaluator = jev0.ProcessEvaluator(['fake'], 1, 100, 100)
+        with patch.object(jev0.subprocess, 'Popen', return_value=process), \
+             patch.object(jev0, 'capture_process_output', side_effect=KeyboardInterrupt()), \
+             patch.object(jev0, 'terminate_process_group') as cleanup:
+            with self.assertRaisesRegex(jev0.Blocked, 'evaluator interrupted'):
+                evaluator.evaluate('diff')
+        cleanup.assert_called_once_with(process)
+
+    def test_normal_evaluator_exit_does_not_kill_process_group(self):
+        import jev0
+        from unittest.mock import patch
+
+        command = [sys.executable, '-c',
+                   'print(\'{"passed":true,"reason":""}\')']
+        evaluator = jev0.ProcessEvaluator(command, 2, 1000, 1000)
+        with patch.object(jev0, 'terminate_process_group') as cleanup:
+            self.assertEqual(evaluator.evaluate('diff'), (True, ''))
+        cleanup.assert_not_called()
+
     def test_protocol_failures_block(self):
         self.stage('src/a')
         cases = [
@@ -353,6 +609,31 @@ class ProcessEvaluatorTests(unittest.TestCase):
         self.blocked(self.cli('staged', '--evaluator-command', self.command(code),
                               '--max-diff-bytes', '1'), 'diff exceeds 1 bytes')
         self.assertFalse((self.repo / 'evaluator-ran').exists())
+
+    def test_process_evaluator_uses_bounded_git_diff_reader(self):
+        import jev0
+        from unittest.mock import Mock, patch
+
+        self.stage('src/a', b'x' * 10000 + b'\n')
+        evaluator = jev0.ProcessEvaluator(['never-runs'], 1, 64, 100)
+        with patch.object(evaluator, 'evaluate') as evaluate, \
+             patch.object(jev0, 'git_limited', wraps=jev0.git_limited) as limited:
+            with self.assertRaisesRegex(jev0.Blocked, 'diff exceeds 64 bytes'):
+                self.evaluate_process_evaluator_direct(evaluator)
+        self.assertTrue(limited.called)
+        evaluate.assert_not_called()
+
+    def evaluate_process_evaluator_direct(self, evaluator):
+        import argparse
+        import jev0
+        from unittest.mock import patch
+
+        previous = os.getcwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(self.repo)
+        args = argparse.Namespace(max_files=20, max_lines=500, allow=[])
+        with patch.dict(os.environ, self.env):
+            jev0.staged(args, evaluator)
 
     def test_invalid_command_arguments(self):
         for value in ('not-json', '{}', '[]', '[""]', '[1]'):

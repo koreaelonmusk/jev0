@@ -25,9 +25,12 @@ jev0 init
 those cases. Run `init` again with the same arguments safely. No shell profiles,
 agent instructions, or global Git settings are edited.
 
-## Three commands
+## Five commands
 
 ```sh
+# Check all tracked changes against HEAD, including unstaged edits.
+jev0 workspace
+
 # Check the index, including forcibly staged ignored files.
 jev0 staged
 
@@ -39,6 +42,10 @@ jev0 init --allow src --allow tests --max-files 10 --max-lines 300
 
 # Bound one foreground command and its ordinary child processes.
 jev0 run --timeout 30 -- python3 -m unittest discover -s tests
+
+# Inspect runtime, executable hash, repository, and hook state without mutation.
+jev0 doctor
+jev0 doctor --json
 ```
 
 | Check | Default |
@@ -55,16 +62,20 @@ binary/model is allowed. Git's diff configuration and attributes affect text
 counts and binary classification. Budgets are review policies, not semantic
 proof that a change is necessary or correct.
 
-`staged` succeeds silently with exit **0**, or blocks with exit **1** and one
+`workspace` checks tracked working-tree state against HEAD and blocks if untracked
+files exist until they are explicitly staged for review. `staged` checks only the
+Git index. Both succeed silently with exit **0**, or block with exit **1** and one
 stderr line. Files and index entries are never rolled back or discarded.
 `run` forwards output and the command's exit status; timeout or launch failure
 returns **1**. Invalid CLI arguments return **2**.
 
 ## What this actually guarantees
 
-The guard itself uses **zero LLM tokens**. It does not guarantee zero agent token
-spend. A pre-commit hook runs after editing and staging; it cannot prevent earlier
-API calls. Agents need not commit, and hooks can be skipped with `--no-verify`.
+The deterministic guard itself uses **zero LLM tokens**. It does not guarantee zero
+agent token spend. A pre-commit hook runs after editing and staging; it cannot
+prevent earlier API calls. `jev0 workspace` can be invoked before completion to
+cover tracked edits that were never staged, but invocation is still advisory unless
+an external system enforces it. Hooks can also be skipped with `--no-verify`.
 
 `run` is an explicit timeout wrapper, **not an OS interceptor or sandbox**. It
 executes the command you provide without shell expansion. It does not classify
@@ -87,6 +98,37 @@ You can add this to the instruction file your agent actually reads:
 
 Cursor, Claude Code, Codex, and Windsurf can use this CLI wherever they can run
 local commands. Automatic interception in these tools has not been tested.
+See [docs/UNIVERSAL.md](docs/UNIVERSAL.md) for the vendor-neutral integration contract.
+
+## Doctor
+
+`jev0 doctor` is read-only. Its JSON output includes `schema_version` for machine
+consumers. It reports the exact executable path and SHA-256,
+Python/Git/platform information, whether the current directory is in a Git
+repository, and whether a jev0-managed pre-commit hook is actually executable.
+
+Use `jev0 doctor --json` for scripts and support reports. `runtime_ready`
+means the local runtime satisfies jev0's current Python/Git/POSIX requirements;
+`hook_enforced` is separate and only reports whether the current repository has
+an executable jev0-managed pre-commit hook. A true value is not a sandbox claim.
+
+## Universal workflow
+
+A practical tool-agnostic loop is:
+
+```sh
+# after an agent edits files
+jev0 workspace
+
+# before commit
+jev0 staged
+
+# for bounded test/build commands
+jev0 run --timeout 120 -- python3 -m unittest discover -s tests -v
+```
+
+This gives one stable CLI contract across terminal-capable coding agents without
+pretending every vendor exposes the same plugin or hook API.
 
 ## Verify and measure
 
@@ -156,11 +198,16 @@ JSON value to stdout:
 
 The object must contain only `passed` (boolean) and `reason` (string), and exit
 zero. Rejection, timeout, launch failure, nonzero exit, malformed output, excess
-diff size, or excess response size blocks the check. On timeout, jev0 kills the
-evaluator's POSIX process group. As with `jev0 run`, a process that starts another
-session can escape that group. The response-size check occurs after the process
-exits; it is a protocol limit, not a memory sandbox for malicious evaluators.
-Nonzero-exit stderr diagnostics are truncated to the configured response limit.
+diff size, or excess response size blocks the check. On timeout or interruption,
+jev0 kills the evaluator's POSIX process group with bounded cleanup. As with
+`jev0 run`, a process that starts another session can escape that group.
+
+Evaluator stdout/stderr are drained incrementally with bounded in-memory
+buffers. Stdout is rejected as soon as it exceeds the configured response limit;
+stderr diagnostics retain only the configured prefix. Input diff bytes are also
+bounded before evaluator launch. This is still a protocol/resource guard, not a
+sandbox: a malicious evaluator can consume CPU or create detached processes until
+the timeout or an external sandbox stops it.
 
 Use the same options with `jev0 init` to persist the policy in a new pre-commit
 hook. Commands using repository-relative paths run from the repository root.
@@ -178,8 +225,14 @@ latency, and resource consumption require separate measurement.
 available. To change hook settings or uninstall, inspect `.git/hooks/pre-commit`
 (or the path reported by `git rev-parse --git-path hooks/pre-commit`) and remove
 only the hook marked `# jev0 managed pre-commit hook`. Then rerun `init` if needed.
-For updates, review and remove the installed `$HOME/.local/bin/jev0` before
-running `install.sh` again. `JEV0_BIN_DIR` selects another installation directory.
+If the managed hook content is unchanged but its execute bit was lost, `jev0 init`
+repairs that permission without replacing the file.
+
+The installer creates a new executable atomically and never overwrites different
+existing content or symlinks. Re-running it with identical jev0 content is safe and
+repairs a missing execute bit. For an actual version update, review and remove the
+installed `$HOME/.local/bin/jev0` before running `install.sh` again.
+`JEV0_BIN_DIR` selects another installation directory.
 
 `.gitignore` prevents accidental additions, not `git add -f` or previously tracked
 files. The staged check is the additional gate. Broad `*.bin` exclusion is
