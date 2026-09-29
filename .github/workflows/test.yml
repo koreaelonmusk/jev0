@@ -41,6 +41,7 @@ jobs:
           python3 jev0.py doctor --json
           python3 jev0.py range HEAD HEAD
           python3 jev0.py policy examples/policy.json --json
+          python3 jev0.py policy .github/jev0-policy.json --json
 
   gate:
     name: jev0 gate
