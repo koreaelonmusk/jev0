@@ -401,7 +401,7 @@ def doctor_repository_state():
                 "hook_target": None,
                 "hook_target_exists": False,
                 "hook_matches_executable": False,
-            "hook_policy_sha256": None,
+                "hook_policy_sha256": None,
             }
         hook_text = hook_prefix.decode(errors="replace")
         first_lines = hook_text.splitlines()[:2]
