@@ -1163,6 +1163,110 @@ class EvidenceRepoCheckTests(unittest.TestCase):
         )
 
 
+class EvidenceChainVerifyTests(unittest.TestCase):
+    setUp = GuardTests.setUp
+    git = GuardTests.git
+    cli = GuardTests.cli
+
+    def commit_file(self, name, data, message):
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        self.git('add', '-f', '--', name)
+        self.git('commit', '-qm', message)
+        return self.git('rev-parse', 'HEAD').decode().strip()
+
+    def report(self, name, base, head):
+        result = self.cli('range-report', base, head)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = self.repo / name
+        path.write_text(result.stdout)
+        return path, json.loads(result.stdout)
+
+    def make_chain(self):
+        base = self.commit_file('base.txt', b'base\n', 'base')
+        middle = self.commit_file('src/a.py', b'a\n', 'middle')
+        head = self.commit_file('src/b.py', b'b\n', 'head')
+        first_path, first = self.report('first.json', base, middle)
+        second_path, second = self.report('second.json', middle, head)
+        return first_path, first, second_path, second
+
+    def test_chain_accepts_contiguous_valid_evidence(self):
+        first_path, first, second_path, second = self.make_chain()
+        result = self.cli(
+            'evidence-chain-verify',
+            str(first_path),
+            str(second_path),
+            '--json',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data['valid'])
+        self.assertEqual(data['entries'], 2)
+        self.assertEqual(data['first_base_sha'], first['base_sha'])
+        self.assertEqual(data['final_head_sha'], second['head_sha'])
+        self.assertEqual(
+            data['evidence_sha256s'],
+            [first['evidence_sha256'], second['evidence_sha256']],
+        )
+        canonical = json.dumps(
+            data['evidence_sha256s'], separators=(',', ':'), ensure_ascii=False
+        ).encode('utf-8')
+        self.assertEqual(
+            data['chain_sha256'],
+            hashlib.sha256(canonical).hexdigest(),
+        )
+
+    def test_chain_rejects_gap(self):
+        base = self.commit_file('base.txt', b'base\n', 'base')
+        middle = self.commit_file('src/a.py', b'a\n', 'middle')
+        head = self.commit_file('src/b.py', b'b\n', 'head')
+        first_path, _ = self.report('first.json', base, middle)
+        second_path, _ = self.report('second.json', base, head)
+        result = self.cli(
+            'evidence-chain-verify',
+            str(first_path),
+            str(second_path),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('evidence chain gap at item 2', result.stderr)
+
+    def test_chain_rejects_duplicate_evidence(self):
+        first_path, _, _, _ = self.make_chain()
+        result = self.cli(
+            'evidence-chain-verify',
+            str(first_path),
+            str(first_path),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('duplicate evidence digest', result.stderr)
+
+    def test_chain_rejects_tampered_member(self):
+        first_path, _, second_path, second = self.make_chain()
+        second['evidence_sha256'] = '0' * 64
+        second_path.write_text(json.dumps(second))
+        result = self.cli(
+            'evidence-chain-verify',
+            str(first_path),
+            str(second_path),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('evidence digest mismatch', result.stderr)
+
+    def test_chain_repo_check_revalidates_every_segment(self):
+        first_path, _, second_path, _ = self.make_chain()
+        result = self.cli(
+            'evidence-chain-verify',
+            str(first_path),
+            str(second_path),
+            '--repo-check',
+            '--json',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data['repository_checked'])
+
+
 class BoundedGitReadTests(unittest.TestCase):
     def spawn(self, code):
         return subprocess.Popen(
