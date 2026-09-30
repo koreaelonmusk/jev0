@@ -303,6 +303,26 @@ leaking workstation usernames/directories and lets the same evidence be checked
 after the repository is moved or cloned elsewhere. Evidence JSON parsing is
 strict and rejects duplicate keys at any object depth.
 
+### Verify an evidence chain
+
+Multiple range reports can be verified as one contiguous history:
+
+```sh
+jev0 evidence-chain-verify evidence-1.json evidence-2.json evidence-3.json
+jev0 evidence-chain-verify evidence-*.json --repo-check --json
+```
+
+Every member is first subjected to the full `evidence-verify` validation. The
+chain then requires each prior `head_sha` to equal the next `base_sha`, rejects
+duplicate evidence digests, and emits a deterministic `chain_sha256` over the
+ordered member digests. This detects reordered, duplicated, missing, or tampered
+segments when a continuous verification history is expected.
+
+The chain digest is an integrity identifier, not a signature or timestamp.
+Authenticity still depends on the trusted CI/artifact boundary that produced and
+retained each member. Use `--repo-check` when the referenced Git objects are
+available to revalidate every segment against repository state.
+
 ## GitHub ruleset audit
 
 Export a repository ruleset with GitHub CLI or the REST API, then audit it
