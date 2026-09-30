@@ -253,6 +253,12 @@ artifact SHA-256 in the Step Summary. The artifact digest protects the uploaded
 file object, while `evidence_sha256` protects the canonical evidence fields;
 they are intentionally separate integrity layers.
 
+
+The human-facing Step Summary is rendered by a tested helper rather than inline
+workflow code. Repository-controlled text such as block reasons is forced onto a
+single line, bounded in length, and HTML-escaped before rendering so filenames or
+error text cannot inject headings, links, or raw HTML into the summary.
+
 Range metadata is resource-bounded before parsing: jev0 reads at most 8 MiB
 from each Git metadata stream and gives bounded Git stream reads a finite
 wall-clock deadline. Trusted base-policy reads use a shorter dedicated deadline.
