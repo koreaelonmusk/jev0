@@ -21,9 +21,8 @@ class PolicyGateWorkflowTests(unittest.TestCase):
         self.assertIn('python3 jev0.py range-report', text)
         self.assertIn('cat "$EVIDENCE"', text)
         self.assertIn('GITHUB_STEP_SUMMARY', text)
-        self.assertIn("data['verifier_version']", text)
-        self.assertIn("data['verifier_sha256']", text)
-        self.assertIn("data['evidence_sha256']", text)
+        self.assertIn('python3 scripts/evidence_summary.py "$EVIDENCE"', text)
+        self.assertNotIn("data['verifier_version']", text)
         self.assertIn('exit "$STATUS"', text)
 
     def test_policy_gate_uses_pinned_actions(self):
