@@ -18,6 +18,8 @@ from typing import Optional, Protocol
 
 VERSION = "0.3.0-dev"
 PROCESS_CLEANUP_TIMEOUT = 1.0
+GIT_BOUNDED_READ_TIMEOUT = 30.0
+BASE_POLICY_READ_TIMEOUT = 5.0
 GIT_ERROR_BYTES = 8192
 DOCTOR_SCHEMA_VERSION = 1
 DOCTOR_MAX_FILE_BYTES = 10_000_000
@@ -214,8 +216,74 @@ def git(*args):
     return result.stdout
 
 
+def capture_bounded_stdout(process, timeout, max_bytes, label):
+    """Read one subprocess stdout stream with byte and wall-clock ceilings."""
+
+    if os.name != "posix":
+        raise Blocked("bounded subprocess reads currently require macOS or Linux")
+
+    output = bytearray()
+    selector = selectors.DefaultSelector()
+    os.set_blocking(process.stdout.fileno(), False)
+    selector.register(process.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout
+
+    try:
+        while selector.get_map():
+            returncode = process.poll()
+            if returncode is not None:
+                wait = 0
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    terminate_process_group(process)
+                    raise Blocked(f"{label} exceeded {timeout:g}s")
+                wait = min(remaining, 0.05)
+
+            events = selector.select(wait)
+            if not events:
+                # Never wait for pipe EOF from descendants after the leader exits.
+                if returncode is not None:
+                    break
+                continue
+
+            for key, _ in events:
+                try:
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                output.extend(chunk)
+                if len(output) > max_bytes:
+                    terminate_process_group(process)
+                    raise Blocked(f"{label} exceeds {max_bytes} bytes")
+
+        if process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                terminate_process_group(process)
+                raise Blocked(f"{label} exceeded {timeout:g}s")
+            try:
+                process.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                terminate_process_group(process)
+                raise Blocked(f"{label} exceeded {timeout:g}s") from None
+
+        return bytes(output), process.returncode
+    except KeyboardInterrupt:
+        terminate_process_group(process)
+        raise Blocked("Git operation interrupted") from None
+    finally:
+        selector.close()
+        if process.stdout is not None and not process.stdout.closed:
+            process.stdout.close()
+
+
 def git_output_limited(max_bytes, label, *args):
-    """Capture Git stdout with a hard byte ceiling and bounded diagnostics."""
+    """Capture Git stdout with hard byte and wall-clock ceilings."""
 
     with tempfile.TemporaryFile() as error_stream:
         process = subprocess.Popen(
@@ -224,18 +292,12 @@ def git_output_limited(max_bytes, label, *args):
             stderr=error_stream,
             start_new_session=True,
         )
-        try:
-            output = process.stdout.read(max_bytes + 1)
-            if len(output) > max_bytes:
-                terminate_process_group(process)
-                raise Blocked(f"{label} exceeds {max_bytes} bytes")
-            returncode = process.wait()
-        except KeyboardInterrupt:
-            terminate_process_group(process)
-            raise Blocked("Git operation interrupted") from None
-        finally:
-            if process.stdout is not None and not process.stdout.closed:
-                process.stdout.close()
+        output, returncode = capture_bounded_stdout(
+            process,
+            GIT_BOUNDED_READ_TIMEOUT,
+            max_bytes,
+            label,
+        )
         if returncode:
             error_stream.seek(0)
             detail = error_stream.read(GIT_ERROR_BYTES).decode(errors="replace").strip()
@@ -244,7 +306,7 @@ def git_output_limited(max_bytes, label, *args):
 
 
 def git_limited(max_bytes, *args):
-    """Read at most max_bytes + 1 bytes from Git before rejecting oversized output."""
+    """Read bounded Git diff bytes with a finite wall-clock deadline."""
 
     with tempfile.TemporaryFile() as error_stream:
         process = subprocess.Popen(
@@ -253,18 +315,12 @@ def git_limited(max_bytes, *args):
             stderr=error_stream,
             start_new_session=True,
         )
-        try:
-            output = process.stdout.read(max_bytes + 1)
-            if len(output) > max_bytes:
-                terminate_process_group(process)
-                raise Blocked(f"Layer 1 diff exceeds {max_bytes} bytes")
-            returncode = process.wait()
-        except KeyboardInterrupt:
-            terminate_process_group(process)
-            raise Blocked("Git operation interrupted") from None
-        finally:
-            if process.stdout is not None and not process.stdout.closed:
-                process.stdout.close()
+        output, returncode = capture_bounded_stdout(
+            process,
+            GIT_BOUNDED_READ_TIMEOUT,
+            max_bytes,
+            "Layer 1 diff",
+        )
         if returncode:
             error_stream.seek(0)
             detail = error_stream.read(GIT_ERROR_BYTES).decode(errors="replace").strip()
@@ -719,21 +775,12 @@ def load_policy_from_commit(commit_sha, path):
             stderr=error_stream,
             start_new_session=True,
         )
-        try:
-            output = process.stdout.read(POLICY_MAX_BYTES + 1)
-            if len(output) > POLICY_MAX_BYTES:
-                terminate_process_group(process)
-                raise Blocked(f"policy exceeds {POLICY_MAX_BYTES} bytes")
-            returncode = process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            terminate_process_group(process)
-            raise Blocked("base policy read timed out") from None
-        except KeyboardInterrupt:
-            terminate_process_group(process)
-            raise Blocked("base policy read interrupted") from None
-        finally:
-            if process.stdout is not None and not process.stdout.closed:
-                process.stdout.close()
+        output, returncode = capture_bounded_stdout(
+            process,
+            BASE_POLICY_READ_TIMEOUT,
+            POLICY_MAX_BYTES,
+            "base policy read",
+        )
 
         if returncode:
             error_stream.seek(0)
