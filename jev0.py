@@ -1685,6 +1685,17 @@ def evidence_verify(args):
     return 0
 
 
+def evidence_object_id_argument(value):
+    if (
+        len(value) not in (40, 64)
+        or any(ch not in "0123456789abcdef" for ch in value)
+    ):
+        raise argparse.ArgumentTypeError(
+            "expected boundary must be a lowercase 40- or 64-character Git object id"
+        )
+    return value
+
+
 def evidence_chain_verify(args):
     """Verify a contiguous sequence of already-produced range evidence."""
 
@@ -1715,6 +1726,19 @@ def evidence_chain_verify(args):
                 f"{index + 1}: previous head_sha does not equal current base_sha"
             )
 
+    first_base_sha = documents[0]["base_sha"]
+    final_head_sha = documents[-1]["head_sha"]
+    if (
+        args.expect_first_base is not None
+        and first_base_sha != args.expect_first_base
+    ):
+        raise Blocked("evidence chain first base does not match expected boundary")
+    if (
+        args.expect_final_head is not None
+        and final_head_sha != args.expect_final_head
+    ):
+        raise Blocked("evidence chain final head does not match expected boundary")
+
     digests = [document["evidence_sha256"] for document in documents]
     canonical = json.dumps(
         digests, separators=(",", ":"), ensure_ascii=False
@@ -1723,8 +1747,10 @@ def evidence_chain_verify(args):
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "valid": True,
         "entries": len(documents),
-        "first_base_sha": documents[0]["base_sha"],
-        "final_head_sha": documents[-1]["head_sha"],
+        "first_base_sha": first_base_sha,
+        "final_head_sha": final_head_sha,
+        "expected_first_base_sha": args.expect_first_base,
+        "expected_final_head_sha": args.expect_final_head,
         "evidence_sha256s": digests,
         "chain_sha256": hashlib.sha256(canonical).hexdigest(),
         "current_verifier_match": all(
@@ -2034,6 +2060,8 @@ def main():
     item.add_argument("--json", action="store_true")
     item.add_argument("--require-current-verifier", action="store_true")
     item.add_argument("--repo-check", action="store_true")
+    item.add_argument("--expect-first-base", type=evidence_object_id_argument)
+    item.add_argument("--expect-final-head", type=evidence_object_id_argument)
     item = sub.add_parser("ruleset-check")
     item.add_argument("path")
     item.add_argument("--json", action="store_true")
