@@ -282,6 +282,12 @@ verifies base/worktree policy provenance when present. This distinguishes an
 internally self-consistent JSON document from evidence that actually describes
 the current repository object graph.
 
+For portable evidence, file-backed `policy_path` values are stored as
+repository-relative POSIX paths rather than absolute local paths. This avoids
+leaking workstation usernames/directories and lets the same evidence be checked
+after the repository is moved or cloned elsewhere. Evidence JSON parsing is
+strict and rejects duplicate keys at any object depth.
+
 ## Universal workflow
 
 A practical tool-agnostic loop is:
