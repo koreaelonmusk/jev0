@@ -1144,8 +1144,19 @@ def read_evidence(path):
     if len(raw) > EVIDENCE_MAX_BYTES:
         raise Blocked(f"evidence exceeds {EVIDENCE_MAX_BYTES} bytes")
 
+    def strict_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise Blocked(f"duplicate evidence key: {key}")
+            result[key] = value
+        return result
+
     try:
-        document = json.loads(raw.decode("utf-8"))
+        document = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=strict_object,
+        )
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise Blocked("evidence must be valid UTF-8 JSON") from None
     if not isinstance(document, dict):
@@ -1209,6 +1220,10 @@ def evidence_verify(args):
     else:
         if not isinstance(evidence["policy_path"], str) or not evidence["policy_path"]:
             raise Blocked("file policy evidence must contain policy_path")
+        try:
+            policy_tree_path(evidence["policy_path"])
+        except argparse.ArgumentTypeError as error:
+            raise Blocked("evidence policy_path is invalid: " + str(error)) from None
         value = evidence["policy_sha256"]
         if (
             not isinstance(value, str)
@@ -1336,7 +1351,7 @@ def evidence_verify(args):
             if tree_path != evidence["policy_path"]:
                 raise Blocked("evidence base policy path does not match repository")
         elif evidence["policy_source"] == "worktree":
-            policy_path = Path(evidence["policy_path"])
+            policy_path = root / evidence["policy_path"]
             try:
                 resolved = policy_path.resolve(strict=True)
                 resolved.relative_to(root.resolve())
@@ -1392,9 +1407,10 @@ def range_report(args):
         policy_source = "base"
         policy_path = tree_path
     elif args.policy is not None:
-        settings, resolved = load_policy(args.policy, Path.cwd())
+        root = Path.cwd().resolve()
+        settings, resolved = load_policy(args.policy, root)
         policy_source = "worktree"
-        policy_path = str(resolved)
+        policy_path = resolved.relative_to(root).as_posix()
         policy_sha256 = file_sha256(resolved, POLICY_MAX_BYTES)
     else:
         settings = argparse.Namespace(
