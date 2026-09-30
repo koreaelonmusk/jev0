@@ -77,3 +77,11 @@ can contain repository-controlled filenames or diagnostic text, so summaries are
 rendered by `scripts/evidence_summary.py` with bounded field lengths,
 single-line normalization, and HTML escaping. Do not replace this with direct
 interpolation of evidence strings into Markdown.
+
+## Ruleset diagnostics
+
+`jev0 ruleset-check` consumes an exported Ruleset JSON file and local repository
+metadata. It does not authenticate to GitHub or mutate repository settings.
+Recommendations are configuration diagnostics, not proof that GitHub has already
+applied the suggested state. Re-fetch the Ruleset after changes and re-run the
+audit to verify the server-side configuration.
