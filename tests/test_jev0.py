@@ -271,7 +271,7 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(data['max_files'], 7)
         self.assertEqual(data['max_lines'], 500)
         self.assertEqual(data['allow'], ['src', 'tests'])
-        self.assertEqual(data['policy_path'], str(policy.resolve()))
+        self.assertEqual(data['policy_path'], '.jev0.json')
         self.assertEqual(
             data['policy_sha256'],
             hashlib.sha256(policy.read_bytes()).hexdigest(),
@@ -952,6 +952,32 @@ class EvidenceVerifyTests(unittest.TestCase):
         result = self.cli('evidence-verify', str(path))
         self.assertEqual(result.returncode, 1)
         self.assertIn('evidence keys mismatch', result.stderr)
+
+    def test_evidence_verify_rejects_duplicate_keys(self):
+        path, evidence = self.make_evidence()
+        raw = json.dumps(evidence, separators=(',', ':'))
+        raw = raw.replace(
+            '"decision":"allow"',
+            '"decision":"allow","decision":"allow"',
+            1,
+        )
+        path.write_text(raw)
+        result = self.cli('evidence-verify', str(path))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('duplicate evidence key: decision', result.stderr)
+
+    def test_evidence_verify_rejects_nested_duplicate_keys(self):
+        path, evidence = self.make_evidence()
+        raw = json.dumps(evidence, separators=(',', ':'))
+        raw = raw.replace(
+            '"max_files":20',
+            '"max_files":20,"max_files":20',
+            1,
+        )
+        path.write_text(raw)
+        result = self.cli('evidence-verify', str(path))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('duplicate evidence key: max_files', result.stderr)
 
     def test_evidence_verify_bounds_input_size(self):
         path = self.repo / 'evidence.json'
