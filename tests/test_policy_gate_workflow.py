@@ -45,6 +45,19 @@ class PolicyGateWorkflowTests(unittest.TestCase):
         self.assertIn('if-no-files-found: ignore', text)
         self.assertIn('retention-days: 30', text)
         self.assertIn('steps.evidence_artifact.outputs.artifact-digest', text)
+        self.assertIn('python3 jev0.py provenance-create "$EVIDENCE"', text)
+        self.assertIn('REPOSITORY: ${{ github.repository }}', text)
+        self.assertIn('WORKFLOW_REF: ${{ github.workflow_ref }}', text)
+        self.assertIn('RUN_ID: ${{ github.run_id }}', text)
+        self.assertIn('RUN_ATTEMPT: ${{ github.run_attempt }}', text)
+        self.assertIn('EVENT_NAME: ${{ github.event_name }}', text)
+        self.assertIn('PR_NUMBER: ${{ github.event.pull_request.number }}', text)
+        self.assertIn('--require-current-verifier', text)
+        self.assertIn('--repo-check > "$PROVENANCE"', text)
+        self.assertIn('path: ${{ runner.temp }}/jev0-ci-provenance.json', text)
+        self.assertIn('steps.provenance_artifact.outputs.artifact-digest', text)
+        self.assertNotIn('id-token: write', text)
+        self.assertNotIn('attestations: write', text)
 
 
 if __name__ == '__main__':
