@@ -1163,6 +1163,81 @@ class EvidenceRepoCheckTests(unittest.TestCase):
         )
 
 
+class BoundedGitReadTests(unittest.TestCase):
+    def spawn(self, code):
+        return subprocess.Popen(
+            [sys.executable, '-c', code],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    def test_bounded_stdout_times_out_without_output(self):
+        import jev0
+
+        process = self.spawn('import time; time.sleep(5)')
+        started = time.monotonic()
+        with self.assertRaisesRegex(
+            jev0.Blocked,
+            'test stream exceeded 0.1s',
+        ):
+            jev0.capture_bounded_stdout(process, 0.1, 1024, 'test stream')
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 1.0)
+        self.assertIsNotNone(process.poll())
+
+    def test_bounded_stdout_rejects_oversized_output(self):
+        import jev0
+
+        process = self.spawn('import sys; sys.stdout.buffer.write(b"x"*4096)')
+        with self.assertRaisesRegex(
+            jev0.Blocked,
+            'test stream exceeds 128 bytes',
+        ):
+            jev0.capture_bounded_stdout(process, 2.0, 128, 'test stream')
+        self.assertIsNotNone(process.poll())
+
+    def test_bounded_stdout_does_not_wait_for_detached_pipe_holder(self):
+        import jev0
+
+        code = (
+            'import subprocess,sys; '
+            'subprocess.Popen([sys.executable,"-c","import time; time.sleep(2)"], '
+            'start_new_session=True); '
+            'print("done", flush=True)'
+        )
+        process = self.spawn(code)
+        started = time.monotonic()
+        output, returncode = jev0.capture_bounded_stdout(
+            process, 1.0, 1024, 'test stream'
+        )
+        elapsed = time.monotonic() - started
+        self.assertEqual(returncode, 0)
+        self.assertEqual(output, b'done\n')
+        self.assertLess(elapsed, 1.0)
+
+    def test_git_limited_uses_configured_deadline(self):
+        import jev0
+        from unittest.mock import patch
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdout = None
+                self.returncode = 0
+
+        with patch.object(jev0.subprocess, 'Popen', return_value=FakeProcess()), \
+             patch.object(
+                 jev0,
+                 'capture_bounded_stdout',
+                 return_value=(b'', 0),
+             ) as capture:
+            jev0.git_limited(100, 'diff', '--cached')
+        self.assertEqual(
+            capture.call_args.args[1],
+            jev0.GIT_BOUNDED_READ_TIMEOUT,
+        )
+
+
 class DoctorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
