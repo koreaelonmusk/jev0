@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Render bounded, injection-safe Markdown from jev0 range evidence."""
 import argparse
+import html
 import json
 from pathlib import Path
 import sys
@@ -44,32 +45,33 @@ def load_json(path):
 def safe_inline(value):
     if value is None:
         return "none"
-    text = str(value)
-    text = text.replace("\\", "\\\\")
-    text = text.replace("\r", "\\r").replace("\n", "\\n")
-    text = text.replace("`", "\\`")
+    text = str(value).replace("\r", "\\r").replace("\n", "\\n")
     if len(text) > MAX_FIELD_CHARS:
         text = text[: MAX_FIELD_CHARS - 1] + "…"
-    return text
+    return html.escape(text, quote=True)
+
+
+def code(value):
+    return "<code>" + safe_inline(value) + "</code>"
 
 
 def render(data):
     lines = [
         "### jev0 policy evidence",
         "",
-        f"- decision: `{safe_inline(data[\'decision\'])}`",
-        f"- base: `{safe_inline(data[\'base_sha\'])}`",
-        f"- head: `{safe_inline(data[\'head_sha\'])}`",
-        f"- merge base: `{safe_inline(data[\'merge_base_sha\'])}`",
-        f"- policy sha256: `{safe_inline(data[\'policy_sha256\'])}`",
-        f"- verifier: `{safe_inline(data[\'verifier_version\'])}`",
-        f"- verifier sha256: `{safe_inline(data[\'verifier_sha256\'])}`",
-        f"- evidence sha256: `{safe_inline(data[\'evidence_sha256\'])}`",
-        f"- changed files: {safe_inline(data[\'files_changed\'])}",
-        f"- added + deleted lines: {safe_inline(data[\'lines_changed\'])}",
+        "- decision: " + code(data["decision"]),
+        "- base: " + code(data["base_sha"]),
+        "- head: " + code(data["head_sha"]),
+        "- merge base: " + code(data["merge_base_sha"]),
+        "- policy sha256: " + code(data["policy_sha256"]),
+        "- verifier: " + code(data["verifier_version"]),
+        "- verifier sha256: " + code(data["verifier_sha256"]),
+        "- evidence sha256: " + code(data["evidence_sha256"]),
+        "- changed files: " + safe_inline(data["files_changed"]),
+        "- added + deleted lines: " + safe_inline(data["lines_changed"]),
     ]
     if data["reason"]:
-        lines.append(f"- reason: `{safe_inline(data[\'reason\'])}`")
+        lines.append("- reason: " + code(data["reason"]))
     return "\n".join(lines) + "\n"
 
 
