@@ -247,9 +247,11 @@ and does not by itself authenticate who produced the report. Authenticity still
 depends on the trusted CI boundary, protected base branch, and verifier provenance.
 
 Range metadata is resource-bounded before parsing: jev0 reads at most 8 MiB
-from each Git metadata stream. Evidence JSON includes at most 1000 changed paths
-while preserving `paths_total` and `paths_truncated`, so extremely large change
-sets cannot force unbounded report growth.
+from each Git metadata stream and gives bounded Git stream reads a finite
+wall-clock deadline. Trusted base-policy reads use a shorter dedicated deadline.
+Evidence JSON includes at most 1000 changed paths while preserving `paths_total`
+and `paths_truncated`, so extremely large or stalled change sets cannot force
+unbounded memory growth or an indefinite wait.
 
 ### Verify persisted evidence
 
