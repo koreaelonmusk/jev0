@@ -271,7 +271,7 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(data['max_files'], 7)
         self.assertEqual(data['max_lines'], 500)
         self.assertEqual(data['allow'], ['src', 'tests'])
-        self.assertEqual(data['policy_path'], '.jev0.json')
+        self.assertEqual(data['policy_path'], str(policy.resolve()))
         self.assertEqual(
             data['policy_sha256'],
             hashlib.sha256(policy.read_bytes()).hexdigest(),
@@ -783,7 +783,7 @@ class RangeEvidenceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout)
         self.assertEqual(data['policy_source'], 'worktree')
-        self.assertEqual(data['policy_path'], str(policy.resolve()))
+        self.assertEqual(data['policy_path'], '.jev0.json')
         self.assertEqual(
             data['policy_sha256'],
             hashlib.sha256(policy.read_bytes()).hexdigest(),
