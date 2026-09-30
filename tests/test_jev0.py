@@ -1266,6 +1266,59 @@ class EvidenceChainVerifyTests(unittest.TestCase):
         data = json.loads(result.stdout)
         self.assertTrue(data['repository_checked'])
 
+    def test_chain_accepts_pinned_boundaries(self):
+        first_path, first, second_path, second = self.make_chain()
+        result = self.cli(
+            'evidence-chain-verify',
+            str(first_path),
+            str(second_path),
+            '--expect-first-base',
+            first['base_sha'],
+            '--expect-final-head',
+            second['head_sha'],
+            '--json',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['expected_first_base_sha'], first['base_sha'])
+        self.assertEqual(data['expected_final_head_sha'], second['head_sha'])
+
+    def test_chain_rejects_wrong_first_boundary(self):
+        first_path, _, second_path, _ = self.make_chain()
+        result = self.cli(
+            'evidence-chain-verify',
+            str(first_path),
+            str(second_path),
+            '--expect-first-base',
+            '0' * 40,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('first base does not match expected boundary', result.stderr)
+
+    def test_chain_rejects_wrong_final_boundary(self):
+        first_path, _, second_path, _ = self.make_chain()
+        result = self.cli(
+            'evidence-chain-verify',
+            str(first_path),
+            str(second_path),
+            '--expect-final-head',
+            '0' * 40,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('final head does not match expected boundary', result.stderr)
+
+    def test_chain_rejects_invalid_boundary_syntax(self):
+        first_path, _, second_path, _ = self.make_chain()
+        result = self.cli(
+            'evidence-chain-verify',
+            str(first_path),
+            str(second_path),
+            '--expect-final-head',
+            'HEAD',
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('expected boundary must be a lowercase', result.stderr)
+
 
 class BoundedGitReadTests(unittest.TestCase):
     def spawn(self, code):
