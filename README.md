@@ -303,6 +303,39 @@ leaking workstation usernames/directories and lets the same evidence be checked
 after the repository is moved or cloned elsewhere. Evidence JSON parsing is
 strict and rejects duplicate keys at any object depth.
 
+## GitHub ruleset audit
+
+Export a repository ruleset with GitHub CLI or the REST API, then audit it
+locally without giving jev0 network credentials:
+
+```sh
+gh api repos/OWNER/REPO/rulesets/RULESET_ID > ruleset.json
+jev0 ruleset-check ruleset.json --json
+```
+
+For a single-maintainer repository, add `--solo`:
+
+```sh
+jev0 ruleset-check ruleset.json --solo
+```
+
+Solo mode treats approval requirements that need another actor as blocking
+errors. The audit also cross-checks the current repository for CODEOWNERS and
+stable local workflow checks such as `jev0 gate` and `jev0 policy gate`.
+
+It detects configurations including:
+
+- required approvals or last-push approval that deadlock solo maintenance,
+- Code Owner review with no CODEOWNERS file,
+- a Required status checks rule with an empty check list,
+- repository gate checks that exist locally but are not required by the ruleset,
+- merge commits offered while linear history is required,
+- missing pull-request, deletion, or force-push protection.
+
+The command is read-only. It does not update GitHub settings. See
+[examples/github-ruleset-solo.json](examples/github-ruleset-solo.json) for a
+known-good solo baseline.
+
 ## Universal workflow
 
 A practical tool-agnostic loop is:

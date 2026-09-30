@@ -28,6 +28,8 @@ POLICY_SCHEMA_VERSION = 1
 POLICY_MAX_BYTES = 65_536
 EVIDENCE_SCHEMA_VERSION = 1
 EVIDENCE_MAX_BYTES = 1_048_576
+RULESET_MAX_BYTES = 1_048_576
+RULESET_REPORT_SCHEMA_VERSION = 1
 CHANGE_METADATA_MAX_BYTES = 8_388_608
 EVIDENCE_MAX_PATHS = 1000
 DEFAULT_MAX_FILES = 20
@@ -912,6 +914,245 @@ def policy_check(args):
     return 0 if state["in_sync"] else 1
 
 
+def read_ruleset(path):
+    candidate = Path(path)
+    try:
+        with candidate.open("rb") as stream:
+            raw = stream.read(RULESET_MAX_BYTES + 1)
+    except OSError as error:
+        raise Blocked("cannot read ruleset: " + str(error)) from None
+    if len(raw) > RULESET_MAX_BYTES:
+        raise Blocked(f"ruleset exceeds {RULESET_MAX_BYTES} bytes")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise Blocked("ruleset must be valid UTF-8 JSON") from None
+    if not isinstance(document, dict):
+        raise Blocked("ruleset root must be a JSON object")
+    if not isinstance(document.get("rules"), list):
+        raise Blocked("ruleset rules must be an array")
+    return document
+
+
+def repository_codeowners(root):
+    candidates = (
+        root / ".github" / "CODEOWNERS",
+        root / "CODEOWNERS",
+        root / "docs" / "CODEOWNERS",
+    )
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def repository_gate_checks(root):
+    checks = []
+    workflow_dir = root / ".github" / "workflows"
+    if not workflow_dir.is_dir():
+        return checks
+    for path in sorted(workflow_dir.iterdir()):
+        if path.suffix not in (".yml", ".yaml") or not path.is_file():
+            continue
+        try:
+            if path.stat().st_size > RULESET_MAX_BYTES:
+                continue
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for name in ("jev0 gate", "jev0 policy gate"):
+            if ("name: " + name) in text and name not in checks:
+                checks.append(name)
+    return checks
+
+
+def ruleset_check(args):
+    ruleset = read_ruleset(args.path)
+    try:
+        root = repository_root()
+    except Blocked:
+        root = Path.cwd().resolve()
+
+    by_type = {}
+    for rule in ruleset["rules"]:
+        if isinstance(rule, dict) and isinstance(rule.get("type"), str):
+            by_type[rule["type"]] = rule
+
+    findings = []
+
+    def finding(severity, code, message, recommendation):
+        findings.append(
+            {
+                "severity": severity,
+                "code": code,
+                "message": message,
+                "recommendation": recommendation,
+            }
+        )
+
+    enforcement = ruleset.get("enforcement")
+    if enforcement != "active":
+        finding(
+            "warning",
+            "ruleset_not_active",
+            f"ruleset enforcement is {enforcement!r}, not 'active'",
+            "Set enforcement status to Active before relying on the ruleset.",
+        )
+
+    conditions = ruleset.get("conditions")
+    includes = []
+    if isinstance(conditions, dict):
+        ref_name = conditions.get("ref_name")
+        if isinstance(ref_name, dict) and isinstance(ref_name.get("include"), list):
+            includes = ref_name["include"]
+    if "~DEFAULT_BRANCH" not in includes:
+        finding(
+            "warning",
+            "default_branch_not_targeted",
+            "ruleset does not explicitly target the default branch",
+            "Target the default branch (or main explicitly) for repository protection.",
+        )
+
+    pull_rule = by_type.get("pull_request")
+    pull = pull_rule.get("parameters", {}) if isinstance(pull_rule, dict) else {}
+    if not isinstance(pull, dict):
+        pull = {}
+    approvals = pull.get("required_approving_review_count", 0)
+    if type(approvals) is not int or approvals < 0:
+        finding(
+            "error",
+            "invalid_required_approvals",
+            "required approving review count is not a non-negative integer",
+            "Use a valid non-negative approval count.",
+        )
+        approvals = 0
+
+    approval_switches = {
+        "require_code_owner_review": "Code Owner review",
+        "require_last_push_approval": "approval from someone other than the last pusher",
+        "require_extra_approval_for_unattributed_changes": "extra approval for unattributed changes",
+    }
+    enabled_switches = [
+        label for key, label in approval_switches.items() if pull.get(key) is True
+    ]
+    if args.solo and (approvals > 0 or enabled_switches):
+        details = []
+        if approvals > 0:
+            details.append(f"{approvals} required approval(s)")
+        details.extend(enabled_switches)
+        finding(
+            "error",
+            "solo_review_deadlock",
+            "single-maintainer mode conflicts with review requirements: "
+            + ", ".join(details),
+            "Set required approvals to 0 and disable Code Owner, last-push, and unattributed-change extra approvals for solo operation.",
+        )
+    elif approvals == 0 and pull.get("require_last_push_approval") is True:
+        finding(
+            "warning",
+            "last_push_approval_with_zero_approvals",
+            "last-push approval is enabled even though required approvals is 0",
+            "Disable last-push approval unless a second reviewer is intentionally required.",
+        )
+
+    codeowners = repository_codeowners(root)
+    if pull.get("require_code_owner_review") is True and codeowners is None:
+        finding(
+            "warning",
+            "code_owner_review_without_codeowners",
+            "Code Owner review is enabled but no CODEOWNERS file exists in the repository",
+            "Add CODEOWNERS intentionally or disable Code Owner review.",
+        )
+
+    status_rule = by_type.get("required_status_checks")
+    status = status_rule.get("parameters", {}) if isinstance(status_rule, dict) else {}
+    configured = []
+    if isinstance(status, dict):
+        values = status.get("required_status_checks", [])
+        if isinstance(values, list):
+            for item in values:
+                if isinstance(item, dict) and isinstance(item.get("context"), str):
+                    configured.append(item["context"])
+
+    discovered = repository_gate_checks(root)
+    if status_rule is not None and not configured:
+        finding(
+            "error",
+            "required_status_checks_empty",
+            "required status checks rule exists but contains no required checks",
+            "Add the stable aggregate checks to the ruleset before treating CI as merge protection.",
+        )
+    missing_checks = [name for name in discovered if name not in configured]
+    if missing_checks:
+        finding(
+            "error",
+            "repository_gates_not_required",
+            "repository gate checks are not required by the ruleset: "
+            + ", ".join(missing_checks),
+            "Add these check names to Required status checks.",
+        )
+
+    if "required_linear_history" in by_type:
+        merge_methods = pull.get("allowed_merge_methods", [])
+        if isinstance(merge_methods, list) and "merge" in merge_methods:
+            finding(
+                "warning",
+                "merge_method_conflicts_with_linear_history",
+                "merge commits are listed as allowed while linear history is required",
+                "Prefer squash and/or rebase only to keep the UI aligned with the enforced history rule.",
+            )
+
+    if "deletion" not in by_type:
+        finding(
+            "warning",
+            "branch_deletion_not_blocked",
+            "branch deletion protection is not enabled",
+            "Enable Restrict deletions for the protected branch.",
+        )
+    if "non_fast_forward" not in by_type:
+        finding(
+            "warning",
+            "force_push_not_blocked",
+            "force-push protection is not enabled",
+            "Enable Block force pushes for the protected branch.",
+        )
+    if pull_rule is None:
+        finding(
+            "error",
+            "pull_request_not_required",
+            "pull requests are not required before updating the protected branch",
+            "Enable Require a pull request before merging.",
+        )
+
+    errors = sum(item["severity"] == "error" for item in findings)
+    warnings = sum(item["severity"] == "warning" for item in findings)
+    report = {
+        "schema_version": RULESET_REPORT_SCHEMA_VERSION,
+        "ruleset_name": ruleset.get("name"),
+        "enforcement": enforcement,
+        "solo": args.solo,
+        "default_branch_targeted": "~DEFAULT_BRANCH" in includes,
+        "codeowners": None if codeowners is None else str(codeowners),
+        "discovered_checks": discovered,
+        "configured_required_checks": configured,
+        "errors": errors,
+        "warnings": warnings,
+        "healthy": errors == 0,
+        "findings": findings,
+    }
+
+    if args.json:
+        print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+    else:
+        print("ruleset: " + str(report["ruleset_name"] or "unnamed"))
+        print("healthy: " + ("yes" if report["healthy"] else "no"))
+        print(f"errors: {errors}")
+        print(f"warnings: {warnings}")
+        for item in findings:
+            print(
+                f"{item['severity']}: {item['code']}: {item['message']} "
+                f"[{item['recommendation']}]"
+            )
+    return 0 if errors == 0 else 1
+
+
 def positive(value):
     number = int(value)
     if number <= 0:
@@ -1723,6 +1964,10 @@ def main():
     item.add_argument("--json", action="store_true")
     item.add_argument("--require-current-verifier", action="store_true")
     item.add_argument("--repo-check", action="store_true")
+    item = sub.add_parser("ruleset-check")
+    item.add_argument("path")
+    item.add_argument("--json", action="store_true")
+    item.add_argument("--solo", action="store_true")
     args = parser.parse_args()
     if args.action in ("staged", "workspace", "init", "range", "range-report") and args.policy is not None:
         if args.max_files is not None or args.max_lines is not None or args.allow:
@@ -1752,6 +1997,7 @@ def main():
             "policy": inspect_policy,
             "policy-check": policy_check,
             "evidence-verify": evidence_verify,
+            "ruleset-check": ruleset_check,
             "range-report": range_report,
         }[args.action](args) or 0
     except (Blocked, OSError, ValueError) as error:
