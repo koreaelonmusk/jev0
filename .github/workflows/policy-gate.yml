@@ -76,3 +76,29 @@ jobs:
           PY
 
           exit "$STATUS"
+
+      - name: Preserve canonical policy evidence
+        id: evidence_artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          path: ${{ runner.temp }}/jev0-range-evidence.json
+          archive: false
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Summarize evidence artifact
+        if: ${{ always() && steps.evidence_artifact.outputs.artifact-id != '' }}
+        env:
+          ARTIFACT_ID: ${{ steps.evidence_artifact.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.evidence_artifact.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.evidence_artifact.outputs.artifact-digest }}
+        run: |
+          {
+            echo
+            echo "### jev0 evidence artifact"
+            echo
+            echo "- artifact id: `$ARTIFACT_ID`"
+            echo "- artifact digest: `$ARTIFACT_DIGEST`"
+            echo "- artifact url: $ARTIFACT_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
