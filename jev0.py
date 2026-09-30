@@ -775,12 +775,17 @@ def load_policy_from_commit(commit_sha, path):
             stderr=error_stream,
             start_new_session=True,
         )
-        output, returncode = capture_bounded_stdout(
-            process,
-            BASE_POLICY_READ_TIMEOUT,
-            POLICY_MAX_BYTES,
-            "base policy read",
-        )
+        try:
+            output, returncode = capture_bounded_stdout(
+                process,
+                BASE_POLICY_READ_TIMEOUT,
+                POLICY_MAX_BYTES,
+                "base policy read",
+            )
+        except Blocked as error:
+            if str(error) == f"base policy read exceeds {POLICY_MAX_BYTES} bytes":
+                raise Blocked(f"policy exceeds {POLICY_MAX_BYTES} bytes") from None
+            raise
 
         if returncode:
             error_stream.seek(0)
