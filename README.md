@@ -329,6 +329,37 @@ Authenticity still depends on the trusted CI/artifact boundary that produced and
 retained each member. Use `--repo-check` when the referenced Git objects are
 available to revalidate every segment against repository state.
 
+### Bind evidence to CI provenance
+
+Trusted CI can wrap one validated evidence document with explicit GitHub Actions
+execution identity:
+
+```sh
+jev0 provenance-create evidence.json \
+  --repository OWNER/REPO \
+  --workflow-ref OWNER/REPO/.github/workflows/policy-gate.yml@refs/heads/main \
+  --run-id 123456 \
+  --run-attempt 1 \
+  --event-name pull_request_target \
+  --pr-number 42 > provenance.json
+
+jev0 provenance-verify provenance.json evidence.json \
+  --expect-repository OWNER/REPO \
+  --expect-run-id 123456
+```
+
+The provenance envelope binds repository, workflow ref, run ID/attempt, event,
+pull-request number, base/head object IDs, evidence digest, and verifier digest
+under a deterministic `provenance_sha256`. The repository policy workflow creates
+this envelope from trusted GitHub context and preserves it as a separate artifact
+without adding write, OIDC, or attestation permissions.
+
+This is **identity binding and integrity**, not cryptographic issuer
+authentication. Anyone able to manufacture arbitrary JSON can imitate the fields
+outside the trusted artifact boundary. A later signed-attestation layer can use
+this stable envelope as its payload without changing the underlying evidence
+format.
+
 ## GitHub ruleset audit
 
 Export a repository ruleset with GitHub CLI or the REST API, then audit it
