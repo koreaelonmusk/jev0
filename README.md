@@ -310,13 +310,19 @@ Multiple range reports can be verified as one contiguous history:
 ```sh
 jev0 evidence-chain-verify evidence-1.json evidence-2.json evidence-3.json
 jev0 evidence-chain-verify evidence-*.json --repo-check --json
+jev0 evidence-chain-verify evidence-*.json \
+  --expect-first-base <trusted-base-sha> \
+  --expect-final-head <expected-head-sha>
 ```
 
 Every member is first subjected to the full `evidence-verify` validation. The
 chain then requires each prior `head_sha` to equal the next `base_sha`, rejects
 duplicate evidence digests, and emits a deterministic `chain_sha256` over the
 ordered member digests. This detects reordered, duplicated, missing, or tampered
-segments when a continuous verification history is expected.
+segments when a continuous verification history is expected. Optional
+`--expect-first-base` and `--expect-final-head` pins require exact lowercase Git
+object IDs, preventing a different but internally contiguous chain from being
+substituted for the intended start or destination.
 
 The chain digest is an integrity identifier, not a signature or timestamp.
 Authenticity still depends on the trusted CI/artifact boundary that produced and
