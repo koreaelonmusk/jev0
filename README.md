@@ -356,9 +356,46 @@ without adding write, OIDC, or attestation permissions.
 
 This is **identity binding and integrity**, not cryptographic issuer
 authentication. Anyone able to manufacture arbitrary JSON can imitate the fields
-outside the trusted artifact boundary. A later signed-attestation layer can use
-this stable envelope as its payload without changing the underlying evidence
-format.
+outside the trusted artifact boundary.
+
+### Cryptographic authenticity with Sigstore
+
+The repository includes a separate `workflow_run` signer for completed
+`policy-gate` runs. This privileged workflow never executes pull-request head
+content. It checks out only the default branch verifier, downloads the immutable
+evidence/provenance artifacts from the completed policy run, re-verifies their
+digest and CI identity bindings, and only then requests a GitHub OIDC identity to
+create a Sigstore-backed GitHub artifact attestation.
+
+The signed subject is the exact `jev0-range-evidence.json` file. The custom
+predicate is the verified `jev0-ci-provenance.json` envelope, so the
+cryptographic statement binds the evidence bytes to repository, workflow, source
+run, pull request, base/head commits, and verifier identity.
+
+The signer alone receives:
+
+```yaml
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+  attestations: write
+```
+
+The original `pull_request_target` policy gate remains read-only and does not
+receive OIDC or attestation privileges. The Sigstore bundle emitted by
+`actions/attest` is retained separately for offline verification in addition to
+GitHub's hosted attestation record.
+
+GitHub CLI verification can independently validate the artifact's cryptographic
+identity against the repository owner:
+
+```sh
+gh attestation verify jev0-range-evidence.json --repo OWNER/REPO
+```
+
+This is the trust transition from a self-consistent hash envelope to an
+externally verifiable cryptographic issuer identity.
 
 ## GitHub ruleset audit
 
