@@ -57,3 +57,15 @@ change detection, and audit correlation. They are not signatures, certificates,
 or proof of authorship. Treat evidence as authenticated only when it was produced
 inside a trusted CI boundary whose workflow, verifier, and policy come from the
 protected base commit.
+
+## Evidence artifact retention
+
+The trusted policy gate uploads the canonical evidence JSON as a GitHub Actions
+artifact using an immutable commit pin for the official upload action. The upload
+runs even when the policy decision blocks the pull request, when an evidence file
+was produced. No secrets or write permissions are granted to the workflow.
+
+The GitHub artifact digest and jev0 `evidence_sha256` have different purposes:
+the artifact digest identifies the uploaded file object, while
+`evidence_sha256` covers the canonical evidence fields. Neither is a signature
+or independent proof of authorship.

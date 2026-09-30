@@ -246,6 +246,13 @@ JSON fields before `evidence_sha256` is added. It is **not** a digital signature
 and does not by itself authenticate who produced the report. Authenticity still
 depends on the trusted CI boundary, protected base branch, and verifier provenance.
 
+
+The trusted GitHub policy gate also preserves the canonical JSON as a direct
+Actions artifact for 30 days. The workflow records GitHub's artifact ID, URL, and
+artifact SHA-256 in the Step Summary. The artifact digest protects the uploaded
+file object, while `evidence_sha256` protects the canonical evidence fields;
+they are intentionally separate integrity layers.
+
 Range metadata is resource-bounded before parsing: jev0 reads at most 8 MiB
 from each Git metadata stream and gives bounded Git stream reads a finite
 wall-clock deadline. Trusted base-policy reads use a shorter dedicated deadline.

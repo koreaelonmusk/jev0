@@ -36,6 +36,16 @@ class PolicyGateWorkflowTests(unittest.TestCase):
             'actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97',
             text,
         )
+        self.assertIn(
+            'actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f',
+            text,
+        )
+        self.assertIn('if: ${{ always() }}', text)
+        self.assertIn('path: ${{ runner.temp }}/jev0-range-evidence.json', text)
+        self.assertIn('archive: false', text)
+        self.assertIn('if-no-files-found: ignore', text)
+        self.assertIn('retention-days: 30', text)
+        self.assertIn('steps.evidence_artifact.outputs.artifact-digest', text)
 
 
 if __name__ == '__main__':
