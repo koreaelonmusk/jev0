@@ -69,3 +69,11 @@ The GitHub artifact digest and jev0 `evidence_sha256` have different purposes:
 the artifact digest identifies the uploaded file object, while
 `evidence_sha256` covers the canonical evidence fields. Neither is a signature
 or independent proof of authorship.
+
+## Summary rendering
+
+GitHub Step Summary output is a separate presentation boundary. Evidence fields
+can contain repository-controlled filenames or diagnostic text, so summaries are
+rendered by `scripts/evidence_summary.py` with bounded field lengths,
+single-line normalization, and HTML escaping. Do not replace this with direct
+interpolation of evidence strings into Markdown.
