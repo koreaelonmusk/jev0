@@ -1672,15 +1672,80 @@ def evidence_verify(args):
         "current_verifier_match": verifier_match,
         "repository_match": repository_match,
     }
+    if not getattr(args, "quiet", False):
+        if args.json:
+            print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        else:
+            print("evidence: valid")
+            print(f"evidence_sha256: {supplied}")
+            print(f"verifier_sha256: {evidence['verifier_sha256']}")
+            print("current_verifier_match: " + ("yes" if verifier_match else "no"))
+            if repository_match is not None:
+                print("repository_match: " + ("yes" if repository_match else "no"))
+    return 0
+
+
+def evidence_chain_verify(args):
+    """Verify a contiguous sequence of already-produced range evidence."""
+
+    documents = []
+    seen = set()
+    for path in args.paths:
+        verify_args = argparse.Namespace(
+            path=path,
+            json=False,
+            require_current_verifier=args.require_current_verifier,
+            repo_check=args.repo_check,
+            quiet=True,
+        )
+        evidence_verify(verify_args)
+        document = read_evidence(path)
+        digest = document["evidence_sha256"]
+        if digest in seen:
+            raise Blocked("evidence chain contains a duplicate evidence digest")
+        seen.add(digest)
+        documents.append(document)
+
+    for index in range(1, len(documents)):
+        previous = documents[index - 1]
+        current = documents[index]
+        if previous["head_sha"] != current["base_sha"]:
+            raise Blocked(
+                "evidence chain gap at item "
+                f"{index + 1}: previous head_sha does not equal current base_sha"
+            )
+
+    digests = [document["evidence_sha256"] for document in documents]
+    canonical = json.dumps(
+        digests, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    result = {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "valid": True,
+        "entries": len(documents),
+        "first_base_sha": documents[0]["base_sha"],
+        "final_head_sha": documents[-1]["head_sha"],
+        "evidence_sha256s": digests,
+        "chain_sha256": hashlib.sha256(canonical).hexdigest(),
+        "current_verifier_match": all(
+            document["verifier_sha256"] == executable_sha256()
+            for document in documents
+        ),
+        "repository_checked": bool(args.repo_check),
+    }
     if args.json:
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     else:
-        print("evidence: valid")
-        print(f"evidence_sha256: {supplied}")
-        print(f"verifier_sha256: {evidence['verifier_sha256']}")
-        print("current_verifier_match: " + ("yes" if verifier_match else "no"))
-        if repository_match is not None:
-            print("repository_match: " + ("yes" if repository_match else "no"))
+        print("evidence_chain: valid")
+        print(f"entries: {result['entries']}")
+        print(f"first_base_sha: {result['first_base_sha']}")
+        print(f"final_head_sha: {result['final_head_sha']}")
+        print(f"chain_sha256: {result['chain_sha256']}")
+        print(
+            "current_verifier_match: "
+            + ("yes" if result["current_verifier_match"] else "no")
+        )
+        print("repository_checked: " + ("yes" if args.repo_check else "no"))
     return 0
 
 
@@ -1964,6 +2029,11 @@ def main():
     item.add_argument("--json", action="store_true")
     item.add_argument("--require-current-verifier", action="store_true")
     item.add_argument("--repo-check", action="store_true")
+    item = sub.add_parser("evidence-chain-verify")
+    item.add_argument("paths", nargs="+")
+    item.add_argument("--json", action="store_true")
+    item.add_argument("--require-current-verifier", action="store_true")
+    item.add_argument("--repo-check", action="store_true")
     item = sub.add_parser("ruleset-check")
     item.add_argument("path")
     item.add_argument("--json", action="store_true")
@@ -1997,6 +2067,7 @@ def main():
             "policy": inspect_policy,
             "policy-check": policy_check,
             "evidence-verify": evidence_verify,
+            "evidence-chain-verify": evidence_chain_verify,
             "ruleset-check": ruleset_check,
             "range-report": range_report,
         }[args.action](args) or 0
