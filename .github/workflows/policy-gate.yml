@@ -56,12 +56,47 @@ jobs:
 
           exit "$STATUS"
 
+      - name: Create CI provenance envelope
+        if: ${{ always() }}
+        env:
+          EVIDENCE: ${{ runner.temp }}/jev0-range-evidence.json
+          PROVENANCE: ${{ runner.temp }}/jev0-ci-provenance.json
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -f "$EVIDENCE" ]; then
+            python3 jev0.py provenance-create "$EVIDENCE" \
+              --repository "$REPOSITORY" \
+              --workflow-ref "$WORKFLOW_REF" \
+              --run-id "$RUN_ID" \
+              --run-attempt "$RUN_ATTEMPT" \
+              --event-name "$EVENT_NAME" \
+              --pr-number "$PR_NUMBER" \
+              --require-current-verifier \
+              --repo-check > "$PROVENANCE"
+            cat "$PROVENANCE"
+          fi
+
       - name: Preserve canonical policy evidence
         id: evidence_artifact
         if: ${{ always() }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           path: ${{ runner.temp }}/jev0-range-evidence.json
+          archive: false
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Preserve CI provenance envelope
+        id: provenance_artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          path: ${{ runner.temp }}/jev0-ci-provenance.json
           archive: false
           if-no-files-found: ignore
           retention-days: 30
@@ -76,6 +111,22 @@ jobs:
           {
             echo
             echo "### jev0 evidence artifact"
+            echo
+            echo "- artifact id: `$ARTIFACT_ID`"
+            echo "- artifact digest: `$ARTIFACT_DIGEST`"
+            echo "- artifact url: $ARTIFACT_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Summarize provenance artifact
+        if: ${{ always() && steps.provenance_artifact.outputs.artifact-id != '' }}
+        env:
+          ARTIFACT_ID: ${{ steps.provenance_artifact.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.provenance_artifact.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.provenance_artifact.outputs.artifact-digest }}
+        run: |
+          {
+            echo
+            echo "### jev0 CI provenance artifact"
             echo
             echo "- artifact id: `$ARTIFACT_ID`"
             echo "- artifact digest: `$ARTIFACT_DIGEST`"

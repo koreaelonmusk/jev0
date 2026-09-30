@@ -28,6 +28,8 @@ POLICY_SCHEMA_VERSION = 1
 POLICY_MAX_BYTES = 65_536
 EVIDENCE_SCHEMA_VERSION = 1
 EVIDENCE_MAX_BYTES = 1_048_576
+PROVENANCE_SCHEMA_VERSION = 1
+PROVENANCE_MAX_BYTES = 1_048_576
 RULESET_MAX_BYTES = 1_048_576
 RULESET_REPORT_SCHEMA_VERSION = 1
 CHANGE_METADATA_MAX_BYTES = 8_388_608
@@ -1685,6 +1687,188 @@ def evidence_verify(args):
     return 0
 
 
+
+def positive_int_argument(value):
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a positive integer") from None
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def read_provenance(path):
+    candidate = Path(path)
+    try:
+        with candidate.open("rb") as stream:
+            raw = stream.read(PROVENANCE_MAX_BYTES + 1)
+    except OSError as error:
+        raise Blocked("cannot read provenance: " + str(error)) from None
+    if len(raw) > PROVENANCE_MAX_BYTES:
+        raise Blocked(f"provenance exceeds {PROVENANCE_MAX_BYTES} bytes")
+
+    def strict_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise Blocked(f"duplicate provenance key: {key}")
+            result[key] = value
+        return result
+
+    try:
+        document = json.loads(raw.decode("utf-8"), object_pairs_hook=strict_object)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise Blocked("provenance must be valid UTF-8 JSON") from None
+    if not isinstance(document, dict):
+        raise Blocked("provenance root must be a JSON object")
+    return document
+
+
+def provenance_create(args):
+    verify_args = argparse.Namespace(
+        path=args.evidence,
+        json=False,
+        require_current_verifier=args.require_current_verifier,
+        repo_check=args.repo_check,
+        quiet=True,
+    )
+    evidence_verify(verify_args)
+    evidence = read_evidence(args.evidence)
+
+    state = {
+        "schema_version": PROVENANCE_SCHEMA_VERSION,
+        "issuer": "github-actions",
+        "repository": args.repository,
+        "workflow_ref": args.workflow_ref,
+        "run_id": args.run_id,
+        "run_attempt": args.run_attempt,
+        "event_name": args.event_name,
+        "pr_number": args.pr_number,
+        "base_sha": evidence["base_sha"],
+        "head_sha": evidence["head_sha"],
+        "evidence_sha256": evidence["evidence_sha256"],
+        "verifier_sha256": evidence["verifier_sha256"],
+    }
+    canonical = json.dumps(
+        state, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    state["provenance_sha256"] = hashlib.sha256(canonical).hexdigest()
+    print(json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    return 0
+
+
+def provenance_verify(args):
+    provenance = read_provenance(args.provenance)
+    required = {
+        "schema_version",
+        "issuer",
+        "repository",
+        "workflow_ref",
+        "run_id",
+        "run_attempt",
+        "event_name",
+        "pr_number",
+        "base_sha",
+        "head_sha",
+        "evidence_sha256",
+        "verifier_sha256",
+        "provenance_sha256",
+    }
+    if set(provenance) != required:
+        raise Blocked("provenance keys mismatch")
+    if provenance["schema_version"] != PROVENANCE_SCHEMA_VERSION:
+        raise Blocked(
+            f"unsupported provenance schema_version {provenance['schema_version']}"
+        )
+    if provenance["issuer"] != "github-actions":
+        raise Blocked("provenance issuer must be github-actions")
+    for key in ("repository", "workflow_ref", "event_name"):
+        if not isinstance(provenance[key], str) or not provenance[key]:
+            raise Blocked(f"provenance {key} must be a non-empty string")
+    for key in ("run_id", "run_attempt", "pr_number"):
+        if type(provenance[key]) is not int or provenance[key] <= 0:
+            raise Blocked(f"provenance {key} must be a positive integer")
+    for key in ("base_sha", "head_sha"):
+        value = provenance[key]
+        if (
+            not isinstance(value, str)
+            or len(value) not in (40, 64)
+            or any(ch not in "0123456789abcdef" for ch in value)
+        ):
+            raise Blocked(f"provenance {key} must be a lowercase Git object id")
+    for key in ("evidence_sha256", "verifier_sha256", "provenance_sha256"):
+        value = provenance[key]
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(ch not in "0123456789abcdef" for ch in value)
+        ):
+            raise Blocked(f"provenance {key} must be a lowercase SHA-256")
+
+    supplied = provenance["provenance_sha256"]
+    unsigned = dict(provenance)
+    del unsigned["provenance_sha256"]
+    canonical = json.dumps(
+        unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    if supplied != hashlib.sha256(canonical).hexdigest():
+        raise Blocked("provenance digest mismatch")
+
+    verify_args = argparse.Namespace(
+        path=args.evidence,
+        json=False,
+        require_current_verifier=args.require_current_verifier,
+        repo_check=args.repo_check,
+        quiet=True,
+    )
+    evidence_verify(verify_args)
+    evidence = read_evidence(args.evidence)
+    linked = {
+        "base_sha": evidence["base_sha"],
+        "head_sha": evidence["head_sha"],
+        "evidence_sha256": evidence["evidence_sha256"],
+        "verifier_sha256": evidence["verifier_sha256"],
+    }
+    for key, value in linked.items():
+        if provenance[key] != value:
+            raise Blocked(f"provenance {key} does not match evidence")
+
+    expectations = {
+        "repository": args.expect_repository,
+        "workflow_ref": args.expect_workflow_ref,
+        "run_id": args.expect_run_id,
+        "pr_number": args.expect_pr_number,
+    }
+    for key, expected in expectations.items():
+        if expected is not None and provenance[key] != expected:
+            raise Blocked(f"provenance {key} does not match expected value")
+
+    result = {
+        "schema_version": PROVENANCE_SCHEMA_VERSION,
+        "valid": True,
+        "provenance_sha256": supplied,
+        "evidence_sha256": evidence["evidence_sha256"],
+        "repository": provenance["repository"],
+        "workflow_ref": provenance["workflow_ref"],
+        "run_id": provenance["run_id"],
+        "run_attempt": provenance["run_attempt"],
+        "pr_number": provenance["pr_number"],
+    }
+    if args.json:
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    else:
+        print("provenance: valid")
+        print(f"provenance_sha256: {supplied}")
+        print(f"evidence_sha256: {evidence['evidence_sha256']}")
+        print(f"repository: {provenance['repository']}")
+        print(f"workflow_ref: {provenance['workflow_ref']}")
+        print(f"run_id: {provenance['run_id']}")
+        print(f"run_attempt: {provenance['run_attempt']}")
+        print(f"pr_number: {provenance['pr_number']}")
+    return 0
+
+
 def evidence_object_id_argument(value):
     if (
         len(value) not in (40, 64)
@@ -2062,6 +2246,26 @@ def main():
     item.add_argument("--repo-check", action="store_true")
     item.add_argument("--expect-first-base", type=evidence_object_id_argument)
     item.add_argument("--expect-final-head", type=evidence_object_id_argument)
+    item = sub.add_parser("provenance-create")
+    item.add_argument("evidence")
+    item.add_argument("--repository", required=True)
+    item.add_argument("--workflow-ref", required=True)
+    item.add_argument("--run-id", type=positive_int_argument, required=True)
+    item.add_argument("--run-attempt", type=positive_int_argument, required=True)
+    item.add_argument("--event-name", required=True)
+    item.add_argument("--pr-number", type=positive_int_argument, required=True)
+    item.add_argument("--require-current-verifier", action="store_true")
+    item.add_argument("--repo-check", action="store_true")
+    item = sub.add_parser("provenance-verify")
+    item.add_argument("provenance")
+    item.add_argument("evidence")
+    item.add_argument("--json", action="store_true")
+    item.add_argument("--require-current-verifier", action="store_true")
+    item.add_argument("--repo-check", action="store_true")
+    item.add_argument("--expect-repository")
+    item.add_argument("--expect-workflow-ref")
+    item.add_argument("--expect-run-id", type=positive_int_argument)
+    item.add_argument("--expect-pr-number", type=positive_int_argument)
     item = sub.add_parser("ruleset-check")
     item.add_argument("path")
     item.add_argument("--json", action="store_true")
@@ -2096,6 +2300,8 @@ def main():
             "policy-check": policy_check,
             "evidence-verify": evidence_verify,
             "evidence-chain-verify": evidence_chain_verify,
+            "provenance-create": provenance_create,
+            "provenance-verify": provenance_verify,
             "ruleset-check": ruleset_check,
             "range-report": range_report,
         }[args.action](args) or 0

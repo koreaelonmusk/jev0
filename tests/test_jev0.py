@@ -1320,6 +1320,130 @@ class EvidenceChainVerifyTests(unittest.TestCase):
         self.assertIn('expected boundary must be a lowercase', result.stderr)
 
 
+class ProvenanceEnvelopeTests(unittest.TestCase):
+    setUp = GuardTests.setUp
+    git = GuardTests.git
+    cli = GuardTests.cli
+
+    def commit_file(self, name, data, message):
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        self.git('add', '-f', '--', name)
+        self.git('commit', '-qm', message)
+        return self.git('rev-parse', 'HEAD').decode().strip()
+
+    def make_evidence(self):
+        base = self.commit_file('base.txt', b'base\n', 'base')
+        head = self.commit_file('src/a.py', b'x\n', 'head')
+        result = self.cli('range-report', base, head)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = self.repo / 'evidence.json'
+        path.write_text(result.stdout)
+        return path, json.loads(result.stdout)
+
+    def create_provenance(self, evidence_path):
+        result = self.cli(
+            'provenance-create',
+            str(evidence_path),
+            '--repository', 'example/jev0',
+            '--workflow-ref', 'example/jev0/.github/workflows/policy-gate.yml@refs/heads/main',
+            '--run-id', '12345',
+            '--run-attempt', '2',
+            '--event-name', 'pull_request_target',
+            '--pr-number', '7',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = self.repo / 'provenance.json'
+        path.write_text(result.stdout)
+        return path, json.loads(result.stdout)
+
+    def test_provenance_create_binds_evidence_and_ci_identity(self):
+        evidence_path, evidence = self.make_evidence()
+        _, provenance = self.create_provenance(evidence_path)
+        self.assertEqual(provenance['issuer'], 'github-actions')
+        self.assertEqual(provenance['evidence_sha256'], evidence['evidence_sha256'])
+        self.assertEqual(provenance['verifier_sha256'], evidence['verifier_sha256'])
+        self.assertEqual(provenance['base_sha'], evidence['base_sha'])
+        self.assertEqual(provenance['head_sha'], evidence['head_sha'])
+        self.assertEqual(provenance['repository'], 'example/jev0')
+        self.assertEqual(provenance['run_id'], 12345)
+        unsigned = dict(provenance)
+        digest = unsigned.pop('provenance_sha256')
+        canonical = json.dumps(
+            unsigned, sort_keys=True, separators=(',', ':'), ensure_ascii=False
+        ).encode('utf-8')
+        self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
+
+    def test_provenance_verify_accepts_linked_envelope(self):
+        evidence_path, _ = self.make_evidence()
+        provenance_path, _ = self.create_provenance(evidence_path)
+        result = self.cli(
+            'provenance-verify',
+            str(provenance_path),
+            str(evidence_path),
+            '--expect-repository', 'example/jev0',
+            '--expect-run-id', '12345',
+            '--expect-pr-number', '7',
+            '--json',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertTrue(data['valid'])
+        self.assertEqual(data['run_attempt'], 2)
+
+    def test_provenance_verify_rejects_tampering(self):
+        evidence_path, _ = self.make_evidence()
+        provenance_path, provenance = self.create_provenance(evidence_path)
+        provenance['run_id'] = 999
+        provenance_path.write_text(json.dumps(provenance))
+        result = self.cli(
+            'provenance-verify', str(provenance_path), str(evidence_path)
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('provenance digest mismatch', result.stderr)
+
+    def test_provenance_verify_rejects_different_evidence(self):
+        evidence_path, _ = self.make_evidence()
+        provenance_path, _ = self.create_provenance(evidence_path)
+        other = self.repo / 'other.json'
+        data = json.loads(evidence_path.read_text())
+        data['evidence_sha256'] = '0' * 64
+        other.write_text(json.dumps(data))
+        result = self.cli(
+            'provenance-verify', str(provenance_path), str(other)
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('evidence digest mismatch', result.stderr)
+
+    def test_provenance_verify_rejects_wrong_expected_identity(self):
+        evidence_path, _ = self.make_evidence()
+        provenance_path, _ = self.create_provenance(evidence_path)
+        result = self.cli(
+            'provenance-verify',
+            str(provenance_path),
+            str(evidence_path),
+            '--expect-repository', 'attacker/repo',
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('repository does not match expected value', result.stderr)
+
+    def test_provenance_rejects_invalid_positive_integer_arguments(self):
+        evidence_path, _ = self.make_evidence()
+        result = self.cli(
+            'provenance-create',
+            str(evidence_path),
+            '--repository', 'example/jev0',
+            '--workflow-ref', 'wf',
+            '--run-id', '0',
+            '--run-attempt', '1',
+            '--event-name', 'pull_request_target',
+            '--pr-number', '7',
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('must be a positive integer', result.stderr)
+
+
 class BoundedGitReadTests(unittest.TestCase):
     def spawn(self, code):
         return subprocess.Popen(
