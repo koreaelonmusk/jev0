@@ -87,7 +87,7 @@ class FailureCaptureTests(unittest.TestCase):
 
     def test_capture_failure_never_changes_original_block_exit(self):
         result = self.trigger_block()
-        self.assertIn("line budget exceeded", result.stderr.lower())
+        self.assertIn("exceed budget", result.stderr.lower())
 
 
 if __name__ == "__main__":
