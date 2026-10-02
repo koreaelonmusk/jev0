@@ -1831,16 +1831,22 @@ class ProcessEvaluatorTests(unittest.TestCase):
         self.blocked(result, 'evaluator exited 7')
         self.assertLess(len(result.stderr), 300)
 
-    def test_unsupported_platform_blocks_before_evaluator_launch(self):
+    def test_process_evaluator_uses_owned_process_controller(self):
         import jev0
-        from unittest.mock import patch
+        from unittest.mock import Mock, patch
 
-        evaluator = jev0.ProcessEvaluator(['never-runs'], 1, 100, 100)
-        with patch.object(jev0.os, 'name', 'nt'), \
-             patch.object(jev0.subprocess, 'Popen') as popen:
-            with self.assertRaisesRegex(jev0.Blocked, 'require macOS or Linux'):
-                evaluator.evaluate('diff')
-        popen.assert_not_called()
+        process = Mock()
+        process.returncode = 0
+        evaluator = jev0.ProcessEvaluator(['fake-evaluator'], 1, 100, 100)
+        with patch.object(jev0, 'spawn_owned_process', return_value=process) as spawn, \
+             patch.object(
+                 jev0,
+                 'capture_process_output',
+                 return_value=(b'{"passed":true,"reason":""}', b''),
+             ):
+            self.assertEqual(evaluator.evaluate('diff'), (True, ''))
+
+        spawn.assert_called_once()
 
     def test_keyboard_interrupt_cleans_evaluator(self):
         import jev0
