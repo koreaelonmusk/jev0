@@ -41,10 +41,14 @@ class WindowsProcessControllerTests(unittest.TestCase):
     def test_run_timeout_kills_owned_child_tree(self):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "escaped"
+            child = (
+                "import time,pathlib; "
+                "time.sleep(1); "
+                "pathlib.Path('escaped').touch()"
+            )
             code = (
                 "import subprocess,sys,time; "
-                "subprocess.Popen([sys.executable,'-c',"
-                ""import time,pathlib; time.sleep(1); pathlib.Path('escaped').touch()"]); "
+                f"subprocess.Popen([sys.executable,'-c',{child!r}]); "
                 "time.sleep(20)"
             )
             result = self.cli(
