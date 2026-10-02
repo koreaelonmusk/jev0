@@ -22,6 +22,15 @@ GIT_ERROR_BYTES = 8192
 DOCTOR_SCHEMA_VERSION = 1
 DOCTOR_MAX_FILE_BYTES = 10_000_000
 DOCTOR_HOOK_PREFIX_BYTES = 16_384
+POLICY_SCHEMA_VERSION = 1
+POLICY_MAX_FILE_BYTES = 65_536
+GUARD_DEFAULTS = {
+    "max_files": 20,
+    "max_lines": 500,
+    "evaluator_timeout": 30.0,
+    "max_diff_bytes": 1_000_000,
+    "max_evaluator_output_bytes": 4096,
+}
 
 
 class Blocked(Exception):
@@ -511,6 +520,226 @@ def doctor(args):
     return 0
 
 
+
+def policy_scope(value):
+    if not isinstance(value, str):
+        raise Blocked("policy allow entries must be strings")
+    try:
+        return scope(value)
+    except argparse.ArgumentTypeError as error:
+        raise Blocked("invalid policy scope: " + str(error)) from None
+
+
+def policy_positive_int(value, name):
+    if type(value) is not int or value <= 0:
+        raise Blocked(f"policy {name} must be a positive integer")
+    return value
+
+
+def policy_duration(value, name):
+    if type(value) not in (int, float):
+        raise Blocked(f"policy {name} must be a finite positive number")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise Blocked(f"policy {name} must be a finite positive number")
+    return number
+
+
+def load_policy(path):
+    """Load a strict, bounded, versioned jev0 policy file."""
+
+    try:
+        policy_path = Path(path).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise Blocked(f"policy file unavailable: {path}") from None
+    if not policy_path.is_file():
+        raise Blocked(f"policy path is not a file: {policy_path}")
+
+    try:
+        with policy_path.open("rb") as stream:
+            payload = stream.read(POLICY_MAX_FILE_BYTES + 1)
+    except OSError as error:
+        raise Blocked(f"policy file unreadable: {error}") from None
+    if len(payload) > POLICY_MAX_FILE_BYTES:
+        raise Blocked(f"policy file exceeds {POLICY_MAX_FILE_BYTES} bytes")
+
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise Blocked("policy file must be valid UTF-8 JSON") from None
+    if not isinstance(document, dict):
+        raise Blocked("policy root must be a JSON object")
+
+    allowed_keys = {"schema_version", "max_files", "max_lines", "allow", "evaluator"}
+    unknown = set(document) - allowed_keys
+    if unknown:
+        raise Blocked("unknown policy keys: " + ", ".join(sorted(unknown)))
+    if document.get("schema_version") != POLICY_SCHEMA_VERSION:
+        raise Blocked(f"policy schema_version must be {POLICY_SCHEMA_VERSION}")
+
+    allow = document.get("allow", [])
+    if not isinstance(allow, list):
+        raise Blocked("policy allow must be an array")
+    normalized_allow = [policy_scope(item) for item in allow]
+    if len(set(normalized_allow)) != len(normalized_allow):
+        raise Blocked("policy allow entries must be unique")
+
+    evaluator = document.get("evaluator")
+    normalized_evaluator = None
+    if evaluator is not None:
+        if not isinstance(evaluator, dict):
+            raise Blocked("policy evaluator must be an object or null")
+        evaluator_keys = {
+            "command",
+            "timeout",
+            "max_diff_bytes",
+            "max_output_bytes",
+        }
+        unknown_evaluator = set(evaluator) - evaluator_keys
+        if unknown_evaluator:
+            raise Blocked(
+                "unknown policy evaluator keys: "
+                + ", ".join(sorted(unknown_evaluator))
+            )
+        command = evaluator.get("command")
+        if (
+            not isinstance(command, list)
+            or not command
+            or any(not isinstance(part, str) or not part for part in command)
+        ):
+            raise Blocked(
+                "policy evaluator command must be a non-empty array of non-empty strings"
+            )
+        normalized_evaluator = {
+            "command": command,
+            "timeout": policy_duration(
+                evaluator.get("timeout", GUARD_DEFAULTS["evaluator_timeout"]),
+                "evaluator.timeout",
+            ),
+            "max_diff_bytes": policy_positive_int(
+                evaluator.get("max_diff_bytes", GUARD_DEFAULTS["max_diff_bytes"]),
+                "evaluator.max_diff_bytes",
+            ),
+            "max_output_bytes": policy_positive_int(
+                evaluator.get(
+                    "max_output_bytes",
+                    GUARD_DEFAULTS["max_evaluator_output_bytes"],
+                ),
+                "evaluator.max_output_bytes",
+            ),
+        }
+
+    normalized = {
+        "schema_version": POLICY_SCHEMA_VERSION,
+        "max_files": policy_positive_int(
+            document.get("max_files", GUARD_DEFAULTS["max_files"]), "max_files"
+        ),
+        "max_lines": policy_positive_int(
+            document.get("max_lines", GUARD_DEFAULTS["max_lines"]), "max_lines"
+        ),
+        "allow": normalized_allow,
+        "evaluator": normalized_evaluator,
+    }
+    return {
+        "path": str(policy_path),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "policy": normalized,
+    }
+
+
+def resolve_guard_arguments(args):
+    """Resolve either CLI guard flags or one explicit versioned policy."""
+
+    override_names = (
+        "max_files",
+        "max_lines",
+        "allow",
+        "evaluator_command",
+        "evaluator_timeout",
+        "max_diff_bytes",
+        "max_evaluator_output_bytes",
+    )
+    policy_value = getattr(args, "policy", None)
+    if policy_value:
+        used = [name for name in override_names if getattr(args, name, None) is not None]
+        if used:
+            raise Blocked(
+                "--policy cannot be combined with guard overrides: "
+                + ", ".join("--" + name.replace("_", "-") for name in used)
+            )
+        loaded = load_policy(policy_value)
+        policy = loaded["policy"]
+        args.max_files = policy["max_files"]
+        args.max_lines = policy["max_lines"]
+        args.allow = list(policy["allow"])
+        evaluator = policy["evaluator"]
+        args.evaluator_command = evaluator["command"] if evaluator else None
+        args.evaluator_timeout = (
+            evaluator["timeout"]
+            if evaluator
+            else GUARD_DEFAULTS["evaluator_timeout"]
+        )
+        args.max_diff_bytes = (
+            evaluator["max_diff_bytes"]
+            if evaluator
+            else GUARD_DEFAULTS["max_diff_bytes"]
+        )
+        args.max_evaluator_output_bytes = (
+            evaluator["max_output_bytes"]
+            if evaluator
+            else GUARD_DEFAULTS["max_evaluator_output_bytes"]
+        )
+        args.policy_path = loaded["path"]
+        args.policy_sha256 = loaded["sha256"]
+        return args
+
+    args.max_files = (
+        GUARD_DEFAULTS["max_files"] if args.max_files is None else args.max_files
+    )
+    args.max_lines = (
+        GUARD_DEFAULTS["max_lines"] if args.max_lines is None else args.max_lines
+    )
+    args.allow = [] if args.allow is None else args.allow
+    args.evaluator_timeout = (
+        GUARD_DEFAULTS["evaluator_timeout"]
+        if args.evaluator_timeout is None
+        else args.evaluator_timeout
+    )
+    args.max_diff_bytes = (
+        GUARD_DEFAULTS["max_diff_bytes"]
+        if args.max_diff_bytes is None
+        else args.max_diff_bytes
+    )
+    args.max_evaluator_output_bytes = (
+        GUARD_DEFAULTS["max_evaluator_output_bytes"]
+        if args.max_evaluator_output_bytes is None
+        else args.max_evaluator_output_bytes
+    )
+    args.policy_path = None
+    args.policy_sha256 = None
+    return args
+
+
+def policy_command(args):
+    loaded = load_policy(args.file)
+    output = {
+        "schema_version": POLICY_SCHEMA_VERSION,
+        "path": loaded["path"],
+        "sha256": loaded["sha256"],
+        "policy": loaded["policy"],
+    }
+    if args.json:
+        print(json.dumps(output, sort_keys=True, separators=(",", ":")))
+    else:
+        print(f"path: {output['path']}")
+        print(f"sha256: {output['sha256']}")
+        print(
+            "policy: "
+            + json.dumps(output["policy"], sort_keys=True, separators=(",", ":"))
+        )
+    return 0
+
+
 def positive(value):
     number = int(value)
     if number <= 0:
@@ -767,26 +996,33 @@ def init(args):
         sys.executable,
         str(Path(__file__).resolve()),
         "staged",
-        "--max-files",
-        str(args.max_files),
-        "--max-lines",
-        str(args.max_lines),
     ]
-    for allowed in args.allow:
-        command.extend(["--allow", allowed])
-    if args.evaluator_command:
+    if args.policy_path:
+        command.extend(["--policy", args.policy_path])
+    else:
         command.extend(
             [
-                "--evaluator-command",
-                json.dumps(args.evaluator_command, separators=(",", ":")),
-                "--evaluator-timeout",
-                str(args.evaluator_timeout),
-                "--max-diff-bytes",
-                str(args.max_diff_bytes),
-                "--max-evaluator-output-bytes",
-                str(args.max_evaluator_output_bytes),
+                "--max-files",
+                str(args.max_files),
+                "--max-lines",
+                str(args.max_lines),
             ]
         )
+        for allowed in args.allow:
+            command.extend(["--allow", allowed])
+        if args.evaluator_command:
+            command.extend(
+                [
+                    "--evaluator-command",
+                    json.dumps(args.evaluator_command, separators=(",", ":")),
+                    "--evaluator-timeout",
+                    str(args.evaluator_timeout),
+                    "--max-diff-bytes",
+                    str(args.max_diff_bytes),
+                    "--max-evaluator-output-bytes",
+                    str(args.max_evaluator_output_bytes),
+                ]
+            )
     content = (
         "#!/bin/sh\n# jev0 managed pre-commit hook\nexec "
         + shlex.join(command)
@@ -832,13 +1068,14 @@ def build_evaluator(args):
 
 
 def add_guard_arguments(item):
-    item.add_argument("--max-files", type=positive, default=20)
-    item.add_argument("--max-lines", type=positive, default=500)
-    item.add_argument("--allow", type=scope, action="append", default=[])
+    item.add_argument("--policy")
+    item.add_argument("--max-files", type=positive)
+    item.add_argument("--max-lines", type=positive)
+    item.add_argument("--allow", type=scope, action="append")
     item.add_argument("--evaluator-command", type=evaluator_command)
-    item.add_argument("--evaluator-timeout", type=duration, default=30.0)
-    item.add_argument("--max-diff-bytes", type=positive, default=1_000_000)
-    item.add_argument("--max-evaluator-output-bytes", type=positive, default=4096)
+    item.add_argument("--evaluator-timeout", type=duration)
+    item.add_argument("--max-diff-bytes", type=positive)
+    item.add_argument("--max-evaluator-output-bytes", type=positive)
 
 
 def main():
@@ -852,14 +1089,24 @@ def main():
     item.add_argument("command", nargs=argparse.REMAINDER)
     item = sub.add_parser("doctor")
     item.add_argument("--json", action="store_true")
+    item = sub.add_parser("policy")
+    item.add_argument("--file", required=True)
+    item.add_argument("--json", action="store_true")
     args = parser.parse_args()
     try:
+        if args.action in ("staged", "workspace", "init"):
+            args = resolve_guard_arguments(args)
         if args.action in ("staged", "workspace"):
             evaluator = build_evaluator(args)
             return {"staged": staged, "workspace": workspace}[args.action](
                 args, evaluator
             ) or 0
-        return {"init": init, "run": run, "doctor": doctor}[args.action](args) or 0
+        return {
+            "init": init,
+            "run": run,
+            "doctor": doctor,
+            "policy": policy_command,
+        }[args.action](args) or 0
     except (Blocked, OSError, ValueError) as error:
         print("jev0: " + " ".join(str(error).splitlines()), file=sys.stderr)
         return 1
