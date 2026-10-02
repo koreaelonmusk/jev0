@@ -2,8 +2,9 @@
 
 **Keep AI-assisted changes small. Stop commands that run too long.**
 
-A local CLI for macOS and Linux. No model downloads, API keys, Python packages,
-network calls, or background service. Requires Python 3.9+ and Git.
+A local CLI for macOS and Linux, with CI-proven Windows core guard paths. No
+model downloads, API keys, Python packages, network calls, or background service.
+Requires Python 3.9+ and Git.
 
 ## Start
 
@@ -71,10 +72,11 @@ files exist until they are explicitly staged for review. `staged` checks only th
 Git index. Both succeed silently with exit **0**, or block with exit **1** and one
 stderr line. Files and index entries are never rolled back or discarded.
 `run` forwards output and the command's exit status; timeout or launch failure
-returns **1**. Its owned-process timeout path is CI-tested on macOS, Linux, and
-Windows. The Git workspace guards, external process evaluator, and `supervise`
-remain macOS/Linux-only until their bounded I/O backends are ported and proven on
-Windows. Invalid CLI arguments return **2**.
+returns **1**. Owned-process timeout, Git workspace/range guards, external
+process evaluation, and `supervise` core paths are CI-tested on macOS, Linux,
+and Windows. Hook installation and the shell installer remain POSIX-oriented
+ergonomics rather than a native Windows installer. Invalid CLI arguments return
+**2**.
 
 ## Supervise one owned agent process tree
 
@@ -93,12 +95,12 @@ jev0 supervise \
 baseline would make it impossible to attribute later policy violations to the
 supervised process. While the child is alive, jev0 repeatedly applies the same
 Layer 0 `workspace` rules used by the CLI. On a violation or timeout, jev0
-terminates only the POSIX process group it created and returns exit 1.
+terminates only the owned process tree it created and returns exit 1.
 
 The polling interval is a sampling cadence, **not** a 15 ms reaction guarantee.
-A child that creates a new session can escape the POSIX process group, and
-filesystem changes can occur between samples. This is containment for an owned
-process tree, not an OS sandbox.
+On POSIX, a child that creates a new session can escape the process group.
+Filesystem changes can occur between samples on every platform. This is
+containment for an owned process tree, not an OS sandbox.
 
 For post-edit commands that should run against an already-modified tracked
 workspace, add `--allow-dirty-baseline`. This does **not** waive the guard:
@@ -185,7 +187,8 @@ an external system enforces it. Hooks can also be skipped with `--no-verify`.
 executes the command you provide without shell expansion. It does not classify
 commands as safe, prevent destructive actions, or stop retries by the calling
 agent. On timeout it kills the command's POSIX process group. A process that
-creates another session can escape that group. No Windows support yet.
+creates another session can escape that group. Windows uses a separate owned
+process-tree controller and bounded threaded pipe reader.
 
 Rules files are guidance, not enforcement. No file watcher, semantic classifier,
 or universal tool integration is claimed. Cold-start latency is measured, not
@@ -212,7 +215,8 @@ Python/Git/platform information, whether the current directory is in a Git
 repository, and whether a jev0-managed pre-commit hook is actually executable.
 
 Use `jev0 doctor --json` for scripts and support reports. `runtime_ready`
-means the local runtime satisfies jev0's current Python/Git/POSIX requirements;
+means the local runtime satisfies jev0's current Python/Git and supported
+process-control backend requirements;
 `hook_enforced` is separate and only reports whether the current repository has
 an executable jev0-managed pre-commit hook. When a hook was created from a policy
 manifest, `hook_policy_sha256` records the manifest fingerprint captured at
