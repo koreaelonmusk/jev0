@@ -2473,7 +2473,7 @@ def main():
             "provenance-verify": provenance_verify,
             "ruleset-check": ruleset_check,
             "range-report": range_report,
-            "failures": (failures_list if args.failure_action == "list" else failures_show),
+            "failures": (failures_list if getattr(args, "failure_action", None) == "list" else failures_show),
         }[args.action](args) or 0
     except (Blocked, OSError, ValueError) as error:
         if getattr(args, "capture_failure", False):
