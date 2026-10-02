@@ -216,5 +216,128 @@ class SuperviseTests(unittest.TestCase):
 
 
 
+    def test_supervise_allows_bounded_untracked_text_when_opted_in(self):
+        code = (
+            "from pathlib import Path; import time; "
+            "Path('src').mkdir(exist_ok=True); "
+            "Path('src/new.py').write_text('one\\ntwo\\n'); "
+            "time.sleep(0.15)"
+        )
+        result = self.cli(
+            "supervise",
+            "--allow-untracked",
+            "--allow",
+            "src",
+            "--max-files",
+            "1",
+            "--max-lines",
+            "2",
+            "--timeout",
+            "2",
+            "--interval",
+            "0.02",
+            "--",
+            sys.executable,
+            "-c",
+            code,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.repo / "src" / "new.py").exists())
+
+    def test_supervise_untracked_text_counts_toward_line_budget(self):
+        code = (
+            "from pathlib import Path; import time; "
+            "Path('new.txt').write_text('one\\ntwo\\n'); "
+            "time.sleep(5)"
+        )
+        result = self.cli(
+            "supervise",
+            "--allow-untracked",
+            "--max-lines",
+            "1",
+            "--timeout",
+            "5",
+            "--interval",
+            "0.02",
+            "--",
+            sys.executable,
+            "-c",
+            code,
+            timeout=8,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("2 added/deleted lines exceed budget 1", result.stderr)
+
+    def test_supervise_untracked_files_count_toward_file_budget(self):
+        code = (
+            "from pathlib import Path; import time; "
+            "Path('one.txt').write_text('1\\n'); "
+            "Path('two.txt').write_text('2\\n'); "
+            "time.sleep(5)"
+        )
+        result = self.cli(
+            "supervise",
+            "--allow-untracked",
+            "--max-files",
+            "1",
+            "--timeout",
+            "5",
+            "--interval",
+            "0.02",
+            "--",
+            sys.executable,
+            "-c",
+            code,
+            timeout=8,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("2 workspace files exceed budget 1", result.stderr)
+
+    def test_supervise_untracked_binary_still_fails_closed(self):
+        code = (
+            "from pathlib import Path; import time; "
+            "Path('blob.dat').write_bytes(b'abc\\x00def'); "
+            "time.sleep(5)"
+        )
+        result = self.cli(
+            "supervise",
+            "--allow-untracked",
+            "--timeout",
+            "5",
+            "--interval",
+            "0.02",
+            "--",
+            sys.executable,
+            "-c",
+            code,
+            timeout=8,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("binary change requires separate review", result.stderr)
+
+    def test_supervise_untracked_model_artifact_still_fails_closed(self):
+        code = (
+            "from pathlib import Path; import time; "
+            "Path('weights.gguf').write_text('not really a model\\n'); "
+            "time.sleep(5)"
+        )
+        result = self.cli(
+            "supervise",
+            "--allow-untracked",
+            "--timeout",
+            "5",
+            "--interval",
+            "0.02",
+            "--",
+            sys.executable,
+            "-c",
+            code,
+            timeout=8,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("model artifact", result.stderr)
+
+
+
 if __name__ == "__main__":
     unittest.main()
