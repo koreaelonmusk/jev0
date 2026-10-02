@@ -2348,7 +2348,10 @@ def supervise(args):
 
     settings, _, _ = resolve_guard_settings(args)
     repository_root()
-    require_clean_workspace()
+    if args.allow_dirty_baseline:
+        heuristic_rules(settings, "workspace")
+    else:
+        require_clean_workspace()
 
     command = args.command
     if command[:1] == ["--"]:
@@ -2461,6 +2464,7 @@ def main():
     item.add_argument("--max-lines", type=positive)
     item.add_argument("--allow", type=scope, action="append")
     item.add_argument("--capture-failure", action="store_true")
+    item.add_argument("--allow-dirty-baseline", action="store_true")
     item.add_argument("--timeout", type=duration, required=True)
     item.add_argument("--interval", type=duration, default=0.05)
     item.add_argument("command", nargs=argparse.REMAINDER)

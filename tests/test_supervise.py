@@ -162,5 +162,59 @@ class SuperviseTests(unittest.TestCase):
         self.assertFalse(record["raw_diff_captured"])
 
 
+    def test_supervise_allows_policy_valid_dirty_tracked_baseline(self):
+        (self.repo / "base.txt").write_text("base\nchanged\n", encoding="utf-8")
+        result = self.cli(
+            "supervise",
+            "--allow-dirty-baseline",
+            "--max-lines",
+            "10",
+            "--timeout",
+            "2",
+            "--",
+            sys.executable,
+            "-c",
+            "print('ok')",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "ok\n")
+
+    def test_supervise_dirty_baseline_must_already_pass_policy(self):
+        (self.repo / "base.txt").write_text("base\n" + "x\n" * 20, encoding="utf-8")
+        marker = self.repo / "spawned.txt"
+        result = self.cli(
+            "supervise",
+            "--allow-dirty-baseline",
+            "--max-lines",
+            "1",
+            "--timeout",
+            "2",
+            "--",
+            sys.executable,
+            "-c",
+            "from pathlib import Path; Path('spawned.txt').write_text('x')",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("exceed budget", result.stderr)
+        self.assertFalse(marker.exists())
+
+    def test_supervise_dirty_baseline_still_rejects_untracked_files(self):
+        (self.repo / "new.txt").write_text("new\n", encoding="utf-8")
+        result = self.cli(
+            "supervise",
+            "--allow-dirty-baseline",
+            "--timeout",
+            "2",
+            "--",
+            sys.executable,
+            "-c",
+            "print('never')",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("untracked file requires staging/review", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+
+
 if __name__ == "__main__":
     unittest.main()
