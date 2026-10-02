@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -65,6 +66,140 @@ class WindowsProcessControllerTests(unittest.TestCase):
             self.assertIn("process group terminated", result.stderr)
             time.sleep(1.1)
             self.assertFalse(marker.exists())
+
+    def _init_repo(self, directory):
+        env = dict(
+            os.environ,
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_GLOBAL=os.devnull,
+        )
+        subprocess.run(["git", "init", "-q"], cwd=directory, env=env, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.invalid"],
+            cwd=directory,
+            env=env,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=directory,
+            env=env,
+            check=True,
+        )
+        path = Path(directory) / "base.txt"
+        path.write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "base.txt"], cwd=directory, env=env, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "base"],
+            cwd=directory,
+            env=env,
+            check=True,
+        )
+        return env
+
+    def test_workspace_staged_and_range_use_portable_bounded_git_reads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self._init_repo(directory)
+            path = Path(directory) / "base.txt"
+            path.write_text("base\nchanged\n", encoding="utf-8")
+
+            workspace = subprocess.run(
+                [sys.executable, str(CLI), "workspace", "--max-lines", "1"],
+                cwd=directory,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(workspace.returncode, 1, workspace.stderr)
+            self.assertIn("added/deleted lines exceed budget", workspace.stderr)
+
+            subprocess.run(["git", "add", "base.txt"], cwd=directory, env=env, check=True)
+            staged = subprocess.run(
+                [sys.executable, str(CLI), "staged", "--max-lines", "1"],
+                cwd=directory,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(staged.returncode, 1, staged.stderr)
+
+            same_range = subprocess.run(
+                [sys.executable, str(CLI), "range", "HEAD", "HEAD"],
+                cwd=directory,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(same_range.returncode, 0, same_range.stderr)
+
+    def test_external_evaluator_uses_portable_bounded_pipe_reader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self._init_repo(directory)
+            path = Path(directory) / "base.txt"
+            path.write_text("base\nchanged\n", encoding="utf-8")
+            subprocess.run(["git", "add", "base.txt"], cwd=directory, env=env, check=True)
+
+            evaluator = json.dumps([
+                sys.executable,
+                "-c",
+                (
+                    "import json,sys; "
+                    "payload=sys.stdin.read(); "
+                    "print(json.dumps({'passed': bool(payload), 'reason': ''}))"
+                ),
+            ])
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CLI),
+                    "staged",
+                    "--evaluator-command",
+                    evaluator,
+                ],
+                cwd=directory,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_supervise_detects_mutation_and_terminates_owned_tree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self._init_repo(directory)
+            code = (
+                "from pathlib import Path; import time; "
+                "Path('base.txt').write_text('base\\n' + 'x\\n' * 20); "
+                "time.sleep(20)"
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CLI),
+                    "supervise",
+                    "--max-lines",
+                    "1",
+                    "--timeout",
+                    "5",
+                    "--interval",
+                    "0.02",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    code,
+                ],
+                cwd=directory,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("supervise workspace violation", result.stderr)
+            self.assertIn("process group terminated", result.stderr)
 
     @unittest.skipUnless(os.name == "nt", "Windows-specific process contract")
     def test_windows_controller_is_selected(self):
