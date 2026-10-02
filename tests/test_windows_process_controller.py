@@ -101,7 +101,7 @@ class WindowsProcessControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             env = self._init_repo(directory)
             path = Path(directory) / "base.txt"
-            path.write_text("base\nchanged\n", encoding="utf-8")
+            path.write_text("base\nchanged\nextra\n", encoding="utf-8")
 
             workspace = subprocess.run(
                 [sys.executable, str(CLI), "workspace", "--max-lines", "1"],
