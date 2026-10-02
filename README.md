@@ -97,6 +97,12 @@ A child that creates a new session can escape the POSIX process group, and
 filesystem changes can occur between samples. This is containment for an owned
 process tree, not an OS sandbox.
 
+For post-edit commands that should run against an already-modified tracked
+workspace, add `--allow-dirty-baseline`. This does **not** waive the guard:
+the existing workspace must already pass the same Layer 0 policy before the
+child is spawned, and every later sample must continue to pass it. Untracked
+files remain rejected in this mode.
+
 The v1 supervisor intentionally supports Layer 0 only. It does not repeatedly
 spawn an external evaluator in the hot polling loop. `--capture-failure` uses
 the same raw-diff-free `jev0-failure/v1` local spool used by other guarded
