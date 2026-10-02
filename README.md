@@ -71,7 +71,10 @@ files exist until they are explicitly staged for review. `staged` checks only th
 Git index. Both succeed silently with exit **0**, or block with exit **1** and one
 stderr line. Files and index entries are never rolled back or discarded.
 `run` forwards output and the command's exit status; timeout or launch failure
-returns **1**. Invalid CLI arguments return **2**.
+returns **1**. Its owned-process timeout path is CI-tested on macOS, Linux, and
+Windows. The Git workspace guards, external process evaluator, and `supervise`
+remain macOS/Linux-only until their bounded I/O backends are ported and proven on
+Windows. Invalid CLI arguments return **2**.
 
 ## Supervise one owned agent process tree
 
