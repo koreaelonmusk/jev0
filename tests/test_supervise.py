@@ -1,0 +1,166 @@
+from pathlib import Path
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+JEV0 = ROOT / "jev0.py"
+
+
+class SuperviseTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temp.name)
+        self.env = dict(
+            os.environ,
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_GLOBAL=os.devnull,
+        )
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, env=self.env, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=self.repo,
+            env=self.env,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=self.repo,
+            env=self.env,
+            check=True,
+        )
+        (self.repo / "base.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "base.txt"], cwd=self.repo, env=self.env, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "base"],
+            cwd=self.repo,
+            env=self.env,
+            check=True,
+        )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def cli(self, *args, timeout=10):
+        return subprocess.run(
+            [sys.executable, str(JEV0), *args],
+            cwd=self.repo,
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+
+    def test_supervise_allows_clean_command(self):
+        result = self.cli(
+            "supervise",
+            "--timeout",
+            "2",
+            "--interval",
+            "0.02",
+            "--",
+            sys.executable,
+            "-c",
+            "print('ok')",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "ok\n")
+
+    def test_supervise_refuses_dirty_baseline_before_spawn(self):
+        (self.repo / "base.txt").write_text("dirty\n", encoding="utf-8")
+        marker = self.repo / "spawned.txt"
+        result = self.cli(
+            "supervise",
+            "--timeout",
+            "2",
+            "--",
+            sys.executable,
+            "-c",
+            "from pathlib import Path; Path('spawned.txt').write_text('x')",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("requires a clean workspace", result.stderr)
+        self.assertFalse(marker.exists())
+
+    def test_supervise_kills_owned_group_on_workspace_violation(self):
+        code = (
+            "from pathlib import Path; import time; "
+            "Path('base.txt').write_text('base\\n' + 'x\\n' * 20); "
+            "time.sleep(5)"
+        )
+        result = self.cli(
+            "supervise",
+            "--max-lines",
+            "1",
+            "--timeout",
+            "5",
+            "--interval",
+            "0.02",
+            "--",
+            sys.executable,
+            "-c",
+            code,
+            timeout=8,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("supervise workspace violation", result.stderr)
+        self.assertIn("process group terminated", result.stderr)
+        self.assertIn("exceed budget", result.stderr)
+
+    def test_supervise_timeout_terminates_group(self):
+        started = time.monotonic()
+        result = self.cli(
+            "supervise",
+            "--timeout",
+            "0.2",
+            "--interval",
+            "0.02",
+            "--",
+            sys.executable,
+            "-c",
+            "import time; time.sleep(5)",
+        )
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("command exceeded", result.stderr)
+        self.assertIn("process group terminated", result.stderr)
+        self.assertLess(elapsed, 3)
+
+    def test_supervise_failure_capture_is_entropy_compatible_shape(self):
+        code = (
+            "from pathlib import Path; import time; "
+            "Path('base.txt').write_text('base\\n' + 'x\\n' * 20); "
+            "time.sleep(5)"
+        )
+        result = self.cli(
+            "supervise",
+            "--max-lines",
+            "1",
+            "--timeout",
+            "5",
+            "--interval",
+            "0.02",
+            "--capture-failure",
+            "--",
+            sys.executable,
+            "-c",
+            code,
+            timeout=8,
+        )
+        self.assertEqual(result.returncode, 1)
+        directory = self.repo / ".git" / "jev0" / "failures"
+        records = sorted(directory.glob("*.json"))
+        self.assertEqual(len(records), 1)
+        record = json.loads(records[0].read_text(encoding="utf-8"))
+        self.assertEqual(record["action"], "supervise")
+        self.assertFalse(record["raw_diff_captured"])
+
+
+if __name__ == "__main__":
+    unittest.main()
