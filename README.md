@@ -469,6 +469,36 @@ local Layer 0 measurement, not a Linux result or a latency guarantee. Linux CI
 verifies correctness; Linux latency has not been measured here. Interpreter,
 Git, and policy overhead were not timed separately.
 
+## Capture blocked agent failures
+
+Failure capture is explicit opt-in and keeps the guard path dependency-free:
+
+```sh
+jev0 workspace --capture-failure
+jev0 staged --capture-failure
+jev0 range BASE HEAD --capture-failure
+
+jev0 failures list
+jev0 failures list --json
+jev0 failures show <failure-id>
+```
+
+When a guarded command is blocked, `--capture-failure` writes one
+content-addressed `jev0-failure/v1` JSON record under
+`.git/jev0/failures/`. The record is written atomically, repeated identical
+failures are idempotent, and the original block exit/status remains authoritative.
+
+The v1 record intentionally contains **no raw diff** and no repository path. It
+contains the guard action, bounded single-line reason, a SHA-256 repository
+fingerprint, current HEAD when available, explicit policy SHA-256 when available,
+and a content-derived `failure_id`. Capture is local-only; jev0 performs no
+network call and does not import a failure-analysis package.
+
+The neutral record is designed for downstream adapters such as
+`entropy-loop-core`, which can convert a captured deterministic failure into
+its own `FailureTrace` / `RegressionCase` model without becoming a jev0
+runtime dependency.
+
 ## Optional Layer 1 evaluators
 
 Layer 0 remains the default: deterministic checks on structured Git metadata.
