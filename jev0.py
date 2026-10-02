@@ -334,7 +334,10 @@ def _threaded_bounded_reader(stream, sink, max_bytes, overflow):
     total = 0
     try:
         while True:
-            chunk = stream.read(65536)
+            try:
+                chunk = stream.read(65536)
+            except (OSError, ValueError):
+                break
             if not chunk:
                 break
             total += len(chunk)
