@@ -101,7 +101,14 @@ For post-edit commands that should run against an already-modified tracked
 workspace, add `--allow-dirty-baseline`. This does **not** waive the guard:
 the existing workspace must already pass the same Layer 0 policy before the
 child is spawned, and every later sample must continue to pass it. Untracked
-files remain rejected in this mode.
+files remain rejected unless `--allow-untracked` is also supplied.
+
+With `--allow-untracked`, new regular files are folded into the same file and
+line budgets as tracked changes and must remain inside the configured allowed
+scopes. Untracked symlinks/special files, NUL-containing binary files, model
+artifacts, and files larger than 8 MiB are rejected. This opt-in affects only
+`supervise`; the standalone `workspace` command keeps its existing
+fail-closed untracked-file semantics.
 
 The v1 supervisor intentionally supports Layer 0 only. It does not repeatedly
 spawn an external evaluator in the hot polling loop. `--capture-failure` uses
