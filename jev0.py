@@ -52,7 +52,7 @@ def _failure_reason(error):
 
 
 def _failure_git_dir(root):
-    raw = git("rev-parse", "--git-dir").rstrip(b"\\n")
+    raw = git("rev-parse", "--git-dir").rstrip(b"\n")
     path = Path(os.fsdecode(raw))
     if not path.is_absolute():
         path = root / path
@@ -106,7 +106,7 @@ def capture_failure(args, error):
     record = build_failure_record(args, error)
     payload = (
         json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        + "\\n"
+        + "\n"
     ).encode("utf-8")
     if len(payload) > FAILURE_MAX_BYTES:
         raise Blocked(f"failure record exceeds {FAILURE_MAX_BYTES} bytes")
