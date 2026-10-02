@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Optional, Protocol
 
@@ -288,20 +289,17 @@ class ProcessEvaluator:
         self.max_output_bytes = max_output_bytes
 
     def evaluate(self, diff_text: str) -> tuple[bool, str]:
-        if os.name != "posix":
-            raise Blocked("Layer 1 process evaluators currently require macOS or Linux")
         payload = diff_text.encode("utf-8")
         if len(payload) > self.max_diff_bytes:
             raise Blocked(f"Layer 1 diff exceeds {self.max_diff_bytes} bytes")
         with tempfile.TemporaryFile() as input_stream:
             input_stream.write(payload)
             input_stream.seek(0)
-            process = subprocess.Popen(
+            process = spawn_owned_process(
                 self.command,
                 stdin=input_stream,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                start_new_session=True,
             )
             try:
                 output, error = capture_process_output(
@@ -332,11 +330,75 @@ class ProcessEvaluator:
         return result["passed"], result["reason"]
 
 
+def _threaded_bounded_reader(stream, sink, max_bytes, overflow):
+    total = 0
+    try:
+        while True:
+            try:
+                chunk = stream.read(65536)
+            except (OSError, ValueError):
+                break
+            if not chunk:
+                break
+            total += len(chunk)
+            if len(sink) < max_bytes:
+                remaining = max_bytes - len(sink)
+                sink.extend(chunk[:remaining])
+            if total > max_bytes:
+                overflow.set()
+    finally:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
+def capture_process_output_windows(process, timeout, max_output_bytes):
+    """Drain Windows evaluator pipes without selectors or unbounded memory."""
+
+    output = bytearray()
+    error = bytearray()
+    stdout_overflow = threading.Event()
+    stderr_overflow = threading.Event()
+    stdout_thread = threading.Thread(
+        target=_threaded_bounded_reader,
+        args=(process.stdout, output, max_output_bytes, stdout_overflow),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_threaded_bounded_reader,
+        args=(process.stderr, error, max_output_bytes, stderr_overflow),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    deadline = time.monotonic() + timeout
+
+    try:
+        while process.poll() is None:
+            if stdout_overflow.is_set():
+                terminate_process_group(process)
+                raise Blocked(f"Layer 1 output exceeds {max_output_bytes} bytes")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                terminate_process_group(process)
+                raise subprocess.TimeoutExpired(process.args, timeout)
+            time.sleep(min(remaining, 0.01))
+
+        stdout_thread.join(timeout=PROCESS_CLEANUP_TIMEOUT)
+        stderr_thread.join(timeout=PROCESS_CLEANUP_TIMEOUT)
+        if stdout_overflow.is_set():
+            raise Blocked(f"Layer 1 output exceeds {max_output_bytes} bytes")
+        return bytes(output), bytes(error)
+    finally:
+        close_process_pipes(process)
+
+
 def capture_process_output(process, timeout, max_output_bytes):
     """Drain evaluator pipes with bounded memory and a finite deadline."""
 
-    if os.name != "posix":
-        raise Blocked("Layer 1 process evaluators currently require macOS or Linux")
+    if os.name == "nt":
+        return capture_process_output_windows(process, timeout, max_output_bytes)
 
     output = bytearray()
     error = bytearray()
@@ -443,11 +505,47 @@ def git(*args):
     return result.stdout
 
 
+def capture_bounded_stdout_windows(process, timeout, max_bytes, label):
+    """Read one Windows subprocess stdout stream with a hard byte ceiling."""
+
+    output = bytearray()
+    overflow = threading.Event()
+    reader = threading.Thread(
+        target=_threaded_bounded_reader,
+        args=(process.stdout, output, max_bytes, overflow),
+        daemon=True,
+    )
+    reader.start()
+    deadline = time.monotonic() + timeout
+
+    try:
+        while process.poll() is None:
+            if overflow.is_set():
+                terminate_process_group(process)
+                raise Blocked(f"{label} exceeds {max_bytes} bytes")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                terminate_process_group(process)
+                raise Blocked(f"{label} exceeded {timeout:g}s")
+            time.sleep(min(remaining, 0.01))
+
+        reader.join(timeout=PROCESS_CLEANUP_TIMEOUT)
+        if overflow.is_set():
+            raise Blocked(f"{label} exceeds {max_bytes} bytes")
+        return bytes(output), process.returncode
+    except KeyboardInterrupt:
+        terminate_process_group(process)
+        raise Blocked("Git operation interrupted") from None
+    finally:
+        if process.stdout is not None and not process.stdout.closed:
+            process.stdout.close()
+
+
 def capture_bounded_stdout(process, timeout, max_bytes, label):
     """Read one subprocess stdout stream with byte and wall-clock ceilings."""
 
-    if os.name != "posix":
-        raise Blocked("bounded subprocess reads currently require macOS or Linux")
+    if os.name == "nt":
+        return capture_bounded_stdout_windows(process, timeout, max_bytes, label)
 
     output = bytearray()
     selector = selectors.DefaultSelector()
@@ -513,11 +611,10 @@ def git_output_limited(max_bytes, label, *args):
     """Capture Git stdout with hard byte and wall-clock ceilings."""
 
     with tempfile.TemporaryFile() as error_stream:
-        process = subprocess.Popen(
+        process = spawn_owned_process(
             ["git", *args],
             stdout=subprocess.PIPE,
             stderr=error_stream,
-            start_new_session=True,
         )
         output, returncode = capture_bounded_stdout(
             process,
@@ -536,11 +633,10 @@ def git_limited(max_bytes, *args):
     """Read bounded Git diff bytes with a finite wall-clock deadline."""
 
     with tempfile.TemporaryFile() as error_stream:
-        process = subprocess.Popen(
+        process = spawn_owned_process(
             ["git", *args],
             stdout=subprocess.PIPE,
             stderr=error_stream,
-            start_new_session=True,
         )
         output, returncode = capture_bounded_stdout(
             process,
@@ -996,11 +1092,10 @@ def load_policy_from_commit(commit_sha, path):
     tree_path = policy_tree_path(path)
     object_spec = f"{commit_sha}:{tree_path}"
     with tempfile.TemporaryFile() as error_stream:
-        process = subprocess.Popen(
+        process = spawn_owned_process(
             ["git", "show", "--no-ext-diff", "--no-textconv", object_spec],
             stdout=subprocess.PIPE,
             stderr=error_stream,
-            start_new_session=True,
         )
         try:
             output, returncode = capture_bounded_stdout(
@@ -2502,10 +2597,7 @@ def supervise(args):
         command = command[1:]
     if not command:
         raise Blocked("supervise requires a command after --")
-    if os.name != "posix":
-        raise Blocked("supervise currently requires macOS or Linux process groups")
-
-    process = subprocess.Popen(command, start_new_session=True)
+    process = spawn_owned_process(command)
     deadline = time.monotonic() + args.timeout
 
     try:
