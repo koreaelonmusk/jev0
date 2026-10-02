@@ -39,6 +39,7 @@ DEFAULT_MAX_LINES = 500
 FAILURE_SCHEMA_VERSION = 1
 FAILURE_REASON_MAX_CHARS = 2048
 FAILURE_MAX_BYTES = 65_536
+SUPERVISE_UNTRACKED_MAX_BYTES = 8_388_608
 
 
 
@@ -1595,6 +1596,93 @@ def heuristic_rules(args, mode):
     heuristic_rules_for_prefix(args, mode_label(mode), diff_prefix(mode))
 
 
+def inspect_untracked_change_set():
+    """Represent bounded untracked files as deterministic added-file metadata."""
+
+    root = repository_root()
+    raw_paths = [
+        field
+        for field in git_output_limited(
+            CHANGE_METADATA_MAX_BYTES,
+            "untracked metadata",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+        ).split(b"\0")
+        if field
+    ]
+
+    entries = []
+    active = set()
+    total = 0
+    paths = []
+
+    for raw_path in raw_paths:
+        path = os.fsdecode(raw_path)
+        target = root / path
+        try:
+            if target.is_symlink():
+                raise Blocked(f"untracked symlink requires separate review: {path!r}")
+            if not target.is_file():
+                raise Blocked(f"untracked special file requires separate review: {path!r}")
+            if target.stat().st_size > SUPERVISE_UNTRACKED_MAX_BYTES:
+                raise Blocked(
+                    f"untracked file exceeds {SUPERVISE_UNTRACKED_MAX_BYTES} bytes: {path!r}"
+                )
+            payload = target.read_bytes()
+        except OSError as error:
+            raise Blocked(f"cannot inspect untracked file {path!r}: {error}") from None
+
+        if b"\0" in payload:
+            added = b"-"
+            removed = b"-"
+        else:
+            line_count = payload.count(b"\n")
+            if payload and not payload.endswith(b"\n"):
+                line_count += 1
+            added = str(line_count).encode("ascii")
+            removed = b"0"
+            total += line_count
+
+        entries.append((added, removed, raw_path, path))
+        active.add(raw_path)
+        paths.append(path)
+
+    return {
+        "entries": entries,
+        "active": active,
+        "files_changed": len(entries),
+        "lines_changed": total,
+        "paths": paths,
+        "paths_truncated": False,
+        "paths_total": len(paths),
+    }
+
+
+def supervise_workspace_rules(args, allow_untracked):
+    """Apply Layer 0 to tracked changes plus opt-in bounded untracked files."""
+
+    if not allow_untracked:
+        heuristic_rules(args, "workspace")
+        return
+
+    tracked = inspect_change_set(diff_prefix("workspace"))
+    untracked = inspect_untracked_change_set()
+    paths = tracked["paths"] + untracked["paths"]
+    analysis = {
+        "entries": tracked["entries"] + untracked["entries"],
+        "active": tracked["active"] | untracked["active"],
+        "files_changed": tracked["files_changed"] + untracked["files_changed"],
+        "lines_changed": tracked["lines_changed"] + untracked["lines_changed"],
+        "paths": paths[:EVIDENCE_MAX_PATHS],
+        "paths_truncated": len(paths) > EVIDENCE_MAX_PATHS,
+        "paths_total": len(paths),
+    }
+    enforce_change_set(args, "workspace", analysis)
+
+
 def read_evidence(path):
     candidate = Path(path)
     try:
@@ -2349,7 +2437,7 @@ def supervise(args):
     settings, _, _ = resolve_guard_settings(args)
     repository_root()
     if args.allow_dirty_baseline:
-        heuristic_rules(settings, "workspace")
+        supervise_workspace_rules(settings, args.allow_untracked)
     else:
         require_clean_workspace()
 
@@ -2367,7 +2455,7 @@ def supervise(args):
     try:
         while True:
             try:
-                heuristic_rules(settings, "workspace")
+                supervise_workspace_rules(settings, args.allow_untracked)
             except Blocked as error:
                 terminate_process_group(process)
                 raise Blocked(
@@ -2465,6 +2553,7 @@ def main():
     item.add_argument("--allow", type=scope, action="append")
     item.add_argument("--capture-failure", action="store_true")
     item.add_argument("--allow-dirty-baseline", action="store_true")
+    item.add_argument("--allow-untracked", action="store_true")
     item.add_argument("--timeout", type=duration, required=True)
     item.add_argument("--interval", type=duration, default=0.05)
     item.add_argument("command", nargs=argparse.REMAINDER)
