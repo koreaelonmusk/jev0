@@ -47,13 +47,34 @@ jobs:
           python3 jev0.py evidence-verify "$RUNNER_TEMP/jev0-evidence.json" \
             --require-current-verifier --repo-check
 
+  windows-process:
+    name: windows process ownership
+    timeout-minutes: 10
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Syntax
+        run: python -m compileall -q jev0.py tests scripts
+      - name: Windows process contract
+        run: python -m unittest discover -s tests -p test_windows_process_controller.py -v
+      - name: CLI run smoke
+        run: python jev0.py run --timeout 5 -- python -c "print('windows-owned-process-ok')"
+
   gate:
     name: jev0 gate
     if: ${{ always() }}
-    needs: test
+    needs: [test, windows-process]
     runs-on: ubuntu-latest
     steps:
       - name: Require full matrix
         env:
           MATRIX_RESULT: ${{ needs.test.result }}
-        run: test "$MATRIX_RESULT" = "success"
+          WINDOWS_RESULT: ${{ needs.windows-process.result }}
+        run: |
+          test "$MATRIX_RESULT" = "success"
+          test "$WINDOWS_RESULT" = "success"
