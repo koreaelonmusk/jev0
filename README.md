@@ -73,6 +73,35 @@ stderr line. Files and index entries are never rolled back or discarded.
 `run` forwards output and the command's exit status; timeout or launch failure
 returns **1**. Invalid CLI arguments return **2**.
 
+## Supervise one owned agent process tree
+
+Use `supervise` when jev0 should own the process it may later terminate:
+
+```sh
+jev0 supervise \
+  --timeout 600 \
+  --interval 0.05 \
+  --policy .jev0.json \
+  --capture-failure \
+  -- claude-code-or-other-agent ...
+```
+
+`supervise` starts only from a clean Git workspace. This is intentional: a dirty
+baseline would make it impossible to attribute later policy violations to the
+supervised process. While the child is alive, jev0 repeatedly applies the same
+Layer 0 `workspace` rules used by the CLI. On a violation or timeout, jev0
+terminates only the POSIX process group it created and returns exit 1.
+
+The polling interval is a sampling cadence, **not** a 15 ms reaction guarantee.
+A child that creates a new session can escape the POSIX process group, and
+filesystem changes can occur between samples. This is containment for an owned
+process tree, not an OS sandbox.
+
+The v1 supervisor intentionally supports Layer 0 only. It does not repeatedly
+spawn an external evaluator in the hot polling loop. `--capture-failure` uses
+the same raw-diff-free `jev0-failure/v1` local spool used by other guarded
+commands.
+
 ## Versioned Layer 0 policy
 
 Use an explicit JSON manifest when multiple people or agents need the same
