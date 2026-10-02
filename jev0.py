@@ -47,6 +47,68 @@ class Blocked(Exception):
     pass
 
 
+class ProcessController(Protocol):
+    """OS-specific ownership and process-tree termination contract."""
+
+    def spawn(self, command, **kwargs):
+        ...
+
+    def terminate_tree(self, process, cleanup_timeout=PROCESS_CLEANUP_TIMEOUT):
+        ...
+
+
+class PosixProcessController:
+    def spawn(self, command, **kwargs):
+        return subprocess.Popen(command, start_new_session=True, **kwargs)
+
+    def terminate_tree(self, process, cleanup_timeout=PROCESS_CLEANUP_TIMEOUT):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        close_process_pipes(process)
+        _bounded_wait_after_kill(process, cleanup_timeout)
+
+
+class WindowsProcessController:
+    def spawn(self, command, **kwargs):
+        flags = kwargs.pop("creationflags", 0)
+        flags |= subprocess.CREATE_NEW_PROCESS_GROUP
+        return subprocess.Popen(command, creationflags=flags, **kwargs)
+
+    def terminate_tree(self, process, cleanup_timeout=PROCESS_CLEANUP_TIMEOUT):
+        if process.poll() is None:
+            try:
+                subprocess.run(
+                    [
+                        "taskkill",
+                        "/PID",
+                        str(process.pid),
+                        "/T",
+                        "/F",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=cleanup_timeout,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    process.kill()
+                except (OSError, ProcessLookupError, PermissionError):
+                    pass
+        close_process_pipes(process)
+        _bounded_wait_after_kill(process, cleanup_timeout)
+
+
+def process_controller():
+    return WindowsProcessController() if os.name == "nt" else PosixProcessController()
+
+
+def spawn_owned_process(command, **kwargs):
+    return process_controller().spawn(command, **kwargs)
+
+
 def _failure_reason(error):
     """Return one bounded, single-line failure reason for local capture."""
     return " ".join(str(error).splitlines())[:FAILURE_REASON_MAX_CHARS]
@@ -350,30 +412,24 @@ def close_process_pipes(process):
             pass
 
 
-def terminate_process_group(process, cleanup_timeout=PROCESS_CLEANUP_TIMEOUT):
-    """Best-effort process-group kill with bounded local cleanup."""
-
-    try:
-        if os.name == "posix":
-            # The leader may already have exited while descendants still keep the
-            # process group (and inherited pipes) alive.
-            os.killpg(process.pid, signal.SIGKILL)
-        elif process.poll() is None:
-            process.kill()
-    except (ProcessLookupError, PermissionError):
-        pass
-    close_process_pipes(process)
+def _bounded_wait_after_kill(process, cleanup_timeout=PROCESS_CLEANUP_TIMEOUT):
     try:
         process.wait(timeout=cleanup_timeout)
     except subprocess.TimeoutExpired:
         try:
             process.kill()
-        except (ProcessLookupError, PermissionError):
+        except (OSError, ProcessLookupError, PermissionError):
             pass
         try:
             process.wait(timeout=cleanup_timeout)
         except subprocess.TimeoutExpired:
             pass
+
+
+def terminate_process_group(process, cleanup_timeout=PROCESS_CLEANUP_TIMEOUT):
+    """Terminate the OS-owned process tree with bounded local cleanup."""
+
+    process_controller().terminate_tree(process, cleanup_timeout)
 
 
 def git(*args):
@@ -2486,9 +2542,7 @@ def run(args):
         command = command[1:]
     if not command:
         raise Blocked("run requires a command after --")
-    if os.name != "posix":
-        raise Blocked("run currently requires macOS or Linux process groups")
-    process = subprocess.Popen(command, start_new_session=True)
+    process = spawn_owned_process(command)
     try:
         returncode = process.wait(timeout=args.timeout)
     except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
