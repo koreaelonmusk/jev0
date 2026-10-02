@@ -36,10 +36,172 @@ CHANGE_METADATA_MAX_BYTES = 8_388_608
 EVIDENCE_MAX_PATHS = 1000
 DEFAULT_MAX_FILES = 20
 DEFAULT_MAX_LINES = 500
+FAILURE_SCHEMA_VERSION = 1
+FAILURE_REASON_MAX_CHARS = 2048
+FAILURE_MAX_BYTES = 65_536
+
 
 
 class Blocked(Exception):
     pass
+
+
+def _failure_reason(error):
+    """Return one bounded, single-line failure reason for local capture."""
+    return " ".join(str(error).splitlines())[:FAILURE_REASON_MAX_CHARS]
+
+
+def _failure_git_dir(root):
+    raw = git("rev-parse", "--git-dir").rstrip(b"\\n")
+    path = Path(os.fsdecode(raw))
+    if not path.is_absolute():
+        path = root / path
+    return path.resolve()
+
+
+def _failure_repository_fingerprint(root):
+    return hashlib.sha256(str(root.resolve()).encode("utf-8")).hexdigest()
+
+
+def _failure_head_sha():
+    try:
+        return resolve_commit("HEAD")
+    except (Blocked, OSError, ValueError):
+        return None
+
+
+def _failure_policy_sha256(args, root):
+    policy = getattr(args, "policy", None)
+    if policy is None:
+        return None
+    try:
+        _, resolved = load_policy(policy, root)
+        return file_sha256(resolved, POLICY_MAX_BYTES)
+    except (Blocked, OSError, ValueError):
+        return None
+
+
+def build_failure_record(args, error):
+    """Build a dependency-free, raw-diff-free jev0-failure/v1 record."""
+    root = repository_root()
+    unsigned = {
+        "schema_version": FAILURE_SCHEMA_VERSION,
+        "kind": "jev0-failure",
+        "action": args.action,
+        "reason": _failure_reason(error),
+        "repository_fingerprint": _failure_repository_fingerprint(root),
+        "head_sha": _failure_head_sha(),
+        "policy_sha256": _failure_policy_sha256(args, root),
+        "raw_diff_captured": False,
+    }
+    canonical = json.dumps(
+        unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return {**unsigned, "failure_id": hashlib.sha256(canonical).hexdigest()}
+
+
+def capture_failure(args, error):
+    """Atomically spool one content-addressed failure under .git/jev0/failures."""
+    root = repository_root()
+    record = build_failure_record(args, error)
+    payload = (
+        json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        + "\\n"
+    ).encode("utf-8")
+    if len(payload) > FAILURE_MAX_BYTES:
+        raise Blocked(f"failure record exceeds {FAILURE_MAX_BYTES} bytes")
+
+    directory = _failure_git_dir(root) / "jev0" / "failures"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    final = directory / (record["failure_id"] + ".json")
+    if final.exists():
+        return record["failure_id"]
+
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".capture-", dir=directory)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, final)
+        except FileExistsError:
+            pass
+        return record["failure_id"]
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _failure_files():
+    root = repository_root()
+    directory = _failure_git_dir(root) / "jev0" / "failures"
+    if not directory.is_dir():
+        return []
+    return sorted(
+        path for path in directory.iterdir()
+        if path.is_file() and path.suffix == ".json" and len(path.stem) == 64
+    )
+
+
+def read_failure_record(path):
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise Blocked("cannot read failure record: " + str(error)) from None
+    if len(raw) > FAILURE_MAX_BYTES:
+        raise Blocked(f"failure record exceeds {FAILURE_MAX_BYTES} bytes")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise Blocked("failure record must be valid UTF-8 JSON") from None
+    required = {
+        "schema_version", "kind", "action", "reason",
+        "repository_fingerprint", "head_sha", "policy_sha256",
+        "raw_diff_captured", "failure_id",
+    }
+    if not isinstance(document, dict) or set(document) != required:
+        raise Blocked("failure record keys mismatch")
+    if document["schema_version"] != FAILURE_SCHEMA_VERSION or document["kind"] != "jev0-failure":
+        raise Blocked("failure record identity is invalid")
+    supplied = document["failure_id"]
+    unsigned = dict(document)
+    del unsigned["failure_id"]
+    canonical = json.dumps(
+        unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    if supplied != hashlib.sha256(canonical).hexdigest():
+        raise Blocked("failure record digest mismatch")
+    return document
+
+
+def failures_list(args):
+    records = [read_failure_record(path) for path in _failure_files()]
+    if args.json:
+        print(json.dumps(records, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    else:
+        for record in records:
+            print(f"{record['failure_id']} {record['action']} {record['reason']}")
+    return 0
+
+
+def failures_show(args):
+    if (
+        len(args.failure_id) != 64
+        or any(ch not in "0123456789abcdef" for ch in args.failure_id)
+    ):
+        raise Blocked("failure id must be a lowercase SHA-256")
+    root = repository_root()
+    path = _failure_git_dir(root) / "jev0" / "failures" / (args.failure_id + ".json")
+    if not path.is_file():
+        raise Blocked("failure record not found")
+    record = read_failure_record(path)
+    print(json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+    return 0
 
 
 class GuardEvaluator(Protocol):
@@ -2202,6 +2364,7 @@ def add_guard_arguments(item):
     item.add_argument("--evaluator-timeout", type=duration, default=30.0)
     item.add_argument("--max-diff-bytes", type=positive, default=1_000_000)
     item.add_argument("--max-evaluator-output-bytes", type=positive, default=4096)
+    item.add_argument("--capture-failure", action="store_true")
 
 
 def main():
@@ -2226,6 +2389,12 @@ def main():
     item = sub.add_parser("run")
     item.add_argument("--timeout", type=duration, required=True)
     item.add_argument("command", nargs=argparse.REMAINDER)
+    item = sub.add_parser("failures")
+    failure_sub = item.add_subparsers(dest="failure_action", required=True)
+    failure_item = failure_sub.add_parser("list")
+    failure_item.add_argument("--json", action="store_true")
+    failure_item = failure_sub.add_parser("show")
+    failure_item.add_argument("failure_id")
     item = sub.add_parser("doctor")
     item.add_argument("--json", action="store_true")
     item = sub.add_parser("policy")
@@ -2304,8 +2473,16 @@ def main():
             "provenance-verify": provenance_verify,
             "ruleset-check": ruleset_check,
             "range-report": range_report,
+            "failures": (failures_list if args.failure_action == "list" else failures_show),
         }[args.action](args) or 0
     except (Blocked, OSError, ValueError) as error:
+        if getattr(args, "capture_failure", False):
+            try:
+                capture_failure(args, error)
+            except (Blocked, OSError, ValueError):
+                # Failure capture is observational only and must never replace
+                # or soften the original guard decision.
+                pass
         print("jev0: " + " ".join(str(error).splitlines()), file=sys.stderr)
         return 1
 
