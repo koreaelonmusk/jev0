@@ -125,9 +125,13 @@ def capture_failure(args, error):
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
+        # Content addressing makes concurrent writers equivalent. Replace is
+        # atomic within the Git metadata filesystem and avoids platform-specific
+        # hard-link restrictions.
+        os.replace(temporary, final)
         try:
-            os.link(temporary, final)
-        except FileExistsError:
+            final.chmod(0o600)
+        except OSError:
             pass
         return record["failure_id"]
     finally:
