@@ -2327,6 +2327,68 @@ def init(args):
         print(f"jev0: repaired pre-commit hook for {root}", file=sys.stderr)
 
 
+def require_clean_workspace():
+    """Require an attributable baseline before supervising one process tree."""
+
+    status = git_output_limited(
+        CHANGE_METADATA_MAX_BYTES,
+        "supervise baseline",
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--",
+    )
+    if status:
+        raise Blocked("supervise requires a clean workspace")
+
+
+def supervise(args):
+    """Own one process group and terminate it when workspace policy is violated."""
+
+    settings, _, _ = resolve_guard_settings(args)
+    repository_root()
+    require_clean_workspace()
+
+    command = args.command
+    if command[:1] == ["--"]:
+        command = command[1:]
+    if not command:
+        raise Blocked("supervise requires a command after --")
+    if os.name != "posix":
+        raise Blocked("supervise currently requires macOS or Linux process groups")
+
+    process = subprocess.Popen(command, start_new_session=True)
+    deadline = time.monotonic() + args.timeout
+
+    try:
+        while True:
+            try:
+                heuristic_rules(settings, "workspace")
+            except Blocked as error:
+                terminate_process_group(process)
+                raise Blocked(
+                    "supervise workspace violation; process group terminated: "
+                    + str(error)
+                ) from None
+
+            returncode = process.poll()
+            if returncode is not None:
+                return returncode if returncode >= 0 else 128 - returncode
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                terminate_process_group(process)
+                raise Blocked(
+                    f"supervise command exceeded {args.timeout:g}s; process group terminated"
+                )
+
+            time.sleep(min(args.interval, remaining))
+    except KeyboardInterrupt:
+        terminate_process_group(process)
+        raise Blocked("supervise command interrupted; process group terminated") from None
+
+
 def run(args):
     command = args.command
     if command[:1] == ["--"]:
@@ -2393,6 +2455,15 @@ def main():
     item = sub.add_parser("run")
     item.add_argument("--timeout", type=duration, required=True)
     item.add_argument("command", nargs=argparse.REMAINDER)
+    item = sub.add_parser("supervise")
+    item.add_argument("--policy", type=policy_argument)
+    item.add_argument("--max-files", type=positive)
+    item.add_argument("--max-lines", type=positive)
+    item.add_argument("--allow", type=scope, action="append")
+    item.add_argument("--capture-failure", action="store_true")
+    item.add_argument("--timeout", type=duration, required=True)
+    item.add_argument("--interval", type=duration, default=0.05)
+    item.add_argument("command", nargs=argparse.REMAINDER)
     item = sub.add_parser("failures")
     failure_sub = item.add_subparsers(dest="failure_action", required=True)
     failure_item = failure_sub.add_parser("list")
@@ -2444,7 +2515,7 @@ def main():
     item.add_argument("--json", action="store_true")
     item.add_argument("--solo", action="store_true")
     args = parser.parse_args()
-    if args.action in ("staged", "workspace", "init", "range", "range-report") and args.policy is not None:
+    if args.action in ("staged", "workspace", "init", "range", "range-report", "supervise") and args.policy is not None:
         if args.max_files is not None or args.max_lines is not None or args.allow:
             parser.error("--policy cannot be combined with --max-files, --max-lines, or --allow")
     if args.action in ("range", "range-report") and args.base_policy is not None:
@@ -2468,6 +2539,7 @@ def main():
         return {
             "init": init,
             "run": run,
+            "supervise": supervise,
             "doctor": doctor,
             "policy": inspect_policy,
             "policy-check": policy_check,
