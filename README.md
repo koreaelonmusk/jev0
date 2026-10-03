@@ -2,12 +2,15 @@
 
 **Keep AI-assisted changes small. Stop commands that run too long.**
 
-A local CLI for macOS and Linux. No model downloads, API keys, Python packages,
-network calls, or background service. Requires Python 3.9+ and Git.
+A local CLI for macOS and Linux, with CI-proven Windows core guard paths. No
+model downloads, API keys, Python packages, network calls, or background service.
+Requires Python 3.9+ and Git.
 
 ## Start
 
 From a reviewed checkout:
+
+macOS / Linux:
 
 ```sh
 git clone https://github.com/koreaelonmusk/jev0.git
@@ -20,12 +23,28 @@ cd /path/to/your/project
 jev0 init
 ```
 
+Windows PowerShell:
+
+```powershell
+git clone https://github.com/koreaelonmusk/jev0.git
+cd jev0
+python -m unittest discover -s tests -p test_windows_process_controller.py -v
+.\install.ps1
+
+# Add the reported install directory to PATH yourself if needed.
+cd C:\path\to\your\project
+jev0 init
+```
+
+Both installers are offline and preserve conflicting existing targets. They do
+not modify shell profiles or PATH automatically.
+
 `init` installs a repository-local pre-commit hook. Existing hooks and custom
 `core.hooksPath` settings are preserved: integrate `jev0 staged` manually in
 those cases. Run `init` again with the same arguments safely. No shell profiles,
 agent instructions, or global Git settings are edited.
 
-## Five commands
+## Core commands
 
 ```sh
 # Check all tracked changes against HEAD, including unstaged edits.
@@ -46,6 +65,14 @@ jev0 run --timeout 30 -- python3 -m unittest discover -s tests
 # Inspect runtime, executable hash, repository, and hook state without mutation.
 jev0 doctor
 jev0 doctor --json
+
+# Negotiate machine-readable runtime/features before integration.
+jev0 capabilities
+jev0 capabilities --json
+
+# Validate and fingerprint one explicit Layer 0 policy manifest.
+jev0 policy .jev0.json
+jev0 policy .jev0.json --json
 ```
 
 | Check | Default |
@@ -67,7 +94,110 @@ files exist until they are explicitly staged for review. `staged` checks only th
 Git index. Both succeed silently with exit **0**, or block with exit **1** and one
 stderr line. Files and index entries are never rolled back or discarded.
 `run` forwards output and the command's exit status; timeout or launch failure
-returns **1**. Invalid CLI arguments return **2**.
+returns **1**. Owned-process timeout, Git workspace/range guards, external
+process evaluation, and `supervise` core paths are CI-tested on macOS, Linux,
+and Windows. Managed Git hooks are CI-tested on Git for Windows, and a native
+PowerShell installer is provided alongside the POSIX shell installer. Invalid CLI
+arguments return **2**.
+
+## Supervise one owned agent process tree
+
+Use `supervise` when jev0 should own the process it may later terminate:
+
+```sh
+jev0 supervise \
+  --timeout 600 \
+  --interval 0.05 \
+  --policy .jev0.json \
+  --capture-failure \
+  -- claude-code-or-other-agent ...
+```
+
+`supervise` pins the current HEAD commit before spawning the child and evaluates
+all later tracked changes against that immutable baseline. A supervised process
+therefore cannot erase its accumulated budget by committing changes and moving
+HEAD. By default the workspace must be clean at launch. While the child is alive,
+jev0 repeatedly applies the same Layer 0 rules against the pinned baseline and
+runs one final check after observing child exit. On a violation or timeout, jev0
+terminates the owned process tree and returns exit 1.
+
+The polling interval is a sampling cadence, **not** a 15 ms reaction guarantee.
+On POSIX, a child that creates a new session can escape the process group.
+Filesystem changes can occur between samples on every platform. This is
+containment for an owned process tree, not an OS sandbox.
+
+For post-edit commands that should run against an already-modified tracked
+workspace, add `--allow-dirty-baseline`. This does **not** waive the guard:
+the existing workspace must already pass the same Layer 0 policy before the
+child is spawned, and every later sample must continue to pass it. Untracked
+files remain rejected unless `--allow-untracked` is also supplied.
+
+With `--allow-untracked`, new regular files are folded into the same file and
+line budgets as tracked changes and must remain inside the configured allowed
+scopes. Untracked symlinks/special files, NUL-containing binary files, model
+artifacts, and files larger than 8 MiB are rejected. This opt-in affects only
+`supervise`; the standalone `workspace` command keeps its existing
+fail-closed untracked-file semantics.
+
+The v1 supervisor intentionally supports Layer 0 only. It does not repeatedly
+spawn an external evaluator in the hot polling loop. `--capture-failure` uses
+the same raw-diff-free `jev0-failure/v1` local spool used by other guarded
+commands.
+
+## Versioned Layer 0 policy
+
+Use an explicit JSON manifest when multiple people or agents need the same
+deterministic Layer 0 budgets:
+
+```json
+{
+  "schema_version": 1,
+  "max_files": 10,
+  "max_lines": 300,
+  "allow": ["src", "tests", "README.md"]
+}
+```
+
+```sh
+jev0 workspace --policy .jev0.json
+jev0 staged --policy .jev0.json
+jev0 init --policy .jev0.json
+```
+
+Policy loading is deliberately **explicit**. jev0 never auto-discovers
+`.jev0.json` or another repository file. Relative policy paths are resolved from
+the repository root, so agent working-directory changes cannot select a different
+policy accidentally. The manifest is bounded to 64 KiB, must resolve to a file
+inside the repository, rejects unknown or duplicate keys, and currently permits
+only `schema_version`, `max_files`, `max_lines`, and `allow`.
+Evaluator commands are never loaded from repository policy files.
+
+`--policy` cannot be combined with `--max-files`, `--max-lines`, or
+`--allow`; this avoids ambiguous precedence. Use `jev0 policy <path> --json`
+to validate a manifest and retrieve its normalized effective values plus SHA-256.
+
+`jev0 init --policy ...` validates the manifest, snapshots its effective Layer 0
+values into the managed hook, and records the source policy SHA-256 in a comment.
+Later edits to the policy file therefore cannot silently weaken an already-installed
+hook. `jev0 doctor` exposes that snapshot fingerprint as `hook_policy_sha256`.
+Recreate the managed hook deliberately when adopting a new policy.
+
+See [examples/policy.json](examples/policy.json) for a copyable manifest.
+
+### Detect policy drift
+
+After installing a managed hook from a manifest, verify that the current manifest
+still matches both the recorded fingerprint and the hook's actual Layer 0 arguments:
+
+```sh
+jev0 policy-check .jev0.json
+jev0 policy-check .jev0.json --json
+```
+
+Exit **0** means the manifest, snapshot fingerprint, and enforced
+`max_files/max_lines/allow` values are all in sync. Exit **1** reports drift,
+including a changed manifest, a missing fingerprint, a missing/stale hook, or
+manual hook argument tampering. This command is read-only and is suitable for CI.
 
 ## What this actually guarantees
 
@@ -81,7 +211,8 @@ an external system enforces it. Hooks can also be skipped with `--no-verify`.
 executes the command you provide without shell expansion. It does not classify
 commands as safe, prevent destructive actions, or stop retries by the calling
 agent. On timeout it kills the command's POSIX process group. A process that
-creates another session can escape that group. No Windows support yet.
+creates another session can escape that group. Windows uses a separate owned
+process-tree controller and bounded threaded pipe reader.
 
 Rules files are guidance, not enforcement. No file watcher, semantic classifier,
 or universal tool integration is claimed. Cold-start latency is measured, not
@@ -100,6 +231,18 @@ Cursor, Claude Code, Codex, and Windsurf can use this CLI wherever they can run
 local commands. Automatic interception in these tools has not been tested.
 See [docs/UNIVERSAL.md](docs/UNIVERSAL.md) for the vendor-neutral integration contract.
 
+## Capability negotiation
+
+`jev0 capabilities --json` is a repository-independent, versioned contract for
+external runtimes. It reports the current process backend, runtime readiness,
+contract schema versions, supported commands, supervision features, and available
+installer surfaces. Integrations should feature-negotiate against this contract
+instead of inferring support from a version string or README text.
+
+The capability contract is descriptive, not authority. A reported feature does
+not grant permission to use it; Extropy or another control plane must still
+supply the authorized policy and execution grant.
+
 ## Doctor
 
 `jev0 doctor` is read-only. Its JSON output includes `schema_version` for machine
@@ -108,9 +251,269 @@ Python/Git/platform information, whether the current directory is in a Git
 repository, and whether a jev0-managed pre-commit hook is actually executable.
 
 Use `jev0 doctor --json` for scripts and support reports. `runtime_ready`
-means the local runtime satisfies jev0's current Python/Git/POSIX requirements;
+means the local runtime satisfies jev0's current Python/Git and supported
+process-control backend requirements;
 `hook_enforced` is separate and only reports whether the current repository has
-an executable jev0-managed pre-commit hook. A true value is not a sandbox claim.
+an executable jev0-managed pre-commit hook. When a hook was created from a policy
+manifest, `hook_policy_sha256` records the manifest fingerprint captured at
+initialization time. A true enforcement value is not a sandbox claim.
+
+## Server-side range guard
+
+Use `range` in CI to validate the full pull-request change set instead of only a
+developer's staged or working-tree state:
+
+```sh
+jev0 range <base-ref> <head-ref> --policy .jev0.json
+```
+
+jev0 resolves both refs to commit IDs first, then evaluates the merge-base diff
+(`base...head`) with the same Layer 0 rules used locally. This matches pull-request
+semantics: unrelated commits added to the base branch after the feature branch was
+created are not charged to the feature.
+
+The command accepts the same explicit policy and optional Layer 1 evaluator flags
+as `staged` and `workspace`. It does not fetch missing refs. CI must check out or
+fetch the base/head commits before calling it. Ref strings are resolved before
+being used in a diff so option-like user input is not passed directly to
+`git diff`.
+
+Example GitHub Actions usage after fetching the base commit:
+
+```sh
+jev0 range "$BASE_SHA" "$HEAD_SHA" --base-policy .github/jev0-policy.json
+```
+
+For server enforcement, prefer `--base-policy` over `--policy`. The policy blob
+is read from the already-resolved base commit, not from the pull-request head.
+That prevents a PR from weakening its own limits and then using those weaker
+limits to approve itself. Base-policy reads are bounded to 64 KiB and fail closed
+when the file is missing, invalid, oversized, or outside the supported schema.
+
+This repository's workflow also exposes one stable aggregate check named
+`jev0 gate`. After the feature is merged, configure the main-branch ruleset to
+require `jev0 gate`; the gate succeeds only when the full macOS/Linux × Python
+matrix succeeds.
+
+This is the server-enforced companion to the local hook: skipping `pre-commit`
+does not bypass a required CI range check.
+
+### Range evidence
+
+Use `range-report` when CI, audit, or incident review needs a machine-readable
+record of the exact decision inputs:
+
+```sh
+jev0 range-report "$BASE_SHA" "$HEAD_SHA" \
+  --base-policy .github/jev0-policy.json
+```
+
+The JSON schema is versioned and includes:
+
+- resolved base and head commit SHAs,
+- merge-base SHA,
+- policy source/path/SHA-256,
+- verifier version and exact jev0 source SHA-256,
+- canonical evidence SHA-256,
+- effective `max_files`, `max_lines`, and `allow`,
+- changed file count,
+- added + deleted line count,
+- changed paths,
+- final `allow` / `block` decision, and
+- the deterministic block reason when rejected.
+
+`range-report` and `range` share the same Layer 0 change-set analysis and
+enforcement function, so the report is evidence of the same decision rather than
+a second implementation of the rules.
+
+The evidence digest is a deterministic integrity identifier over the canonical
+JSON fields before `evidence_sha256` is added. It is **not** a digital signature
+and does not by itself authenticate who produced the report. Authenticity still
+depends on the trusted CI boundary, protected base branch, and verifier provenance.
+
+
+The trusted GitHub policy gate also preserves the canonical JSON as a direct
+Actions artifact for 30 days. The workflow records GitHub's artifact ID, URL, and
+artifact SHA-256 in the Step Summary. The artifact digest protects the uploaded
+file object, while `evidence_sha256` protects the canonical evidence fields;
+they are intentionally separate integrity layers.
+
+
+The human-facing Step Summary is rendered by a tested helper rather than inline
+workflow code. Repository-controlled text such as block reasons is forced onto a
+single line, bounded in length, and HTML-escaped before rendering so filenames or
+error text cannot inject headings, links, or raw HTML into the summary.
+
+Range metadata is resource-bounded before parsing: jev0 reads at most 8 MiB
+from each Git metadata stream and gives bounded Git stream reads a finite
+wall-clock deadline. Trusted base-policy reads use a shorter dedicated deadline.
+Evidence JSON includes at most 1000 changed paths while preserving `paths_total`
+and `paths_truncated`, so extremely large or stalled change sets cannot force
+unbounded memory growth or an indefinite wait.
+
+### Verify persisted evidence
+
+Persisted evidence can be checked later without recomputing the Git diff:
+
+```sh
+jev0 evidence-verify evidence.json
+jev0 evidence-verify evidence.json --json
+jev0 evidence-verify evidence.json --require-current-verifier
+```
+
+The verifier accepts at most 1 MiB of UTF-8 JSON, enforces the evidence schema,
+recomputes the canonical `evidence_sha256`, validates path/count invariants, and
+reports whether the recorded verifier SHA-256 matches the currently running
+`jev0.py`. `--require-current-verifier` turns a verifier mismatch into exit 1.
+
+This verifies deterministic integrity, not authorship. A valid digest proves only
+that the evidence document is internally self-consistent; provenance still
+depends on where the evidence was produced and how that CI boundary is protected.
+
+Use `--repo-check` when the original repository objects are available:
+
+```sh
+jev0 evidence-verify evidence.json --repo-check
+```
+
+Repository checking resolves the recorded base/head commits, recomputes the
+merge base and range statistics, re-applies the recorded Layer 0 policy, and
+verifies base/worktree policy provenance when present. This distinguishes an
+internally self-consistent JSON document from evidence that actually describes
+the current repository object graph.
+
+For portable evidence, file-backed `policy_path` values are stored as
+repository-relative POSIX paths rather than absolute local paths. This avoids
+leaking workstation usernames/directories and lets the same evidence be checked
+after the repository is moved or cloned elsewhere. Evidence JSON parsing is
+strict and rejects duplicate keys at any object depth.
+
+### Verify an evidence chain
+
+Multiple range reports can be verified as one contiguous history:
+
+```sh
+jev0 evidence-chain-verify evidence-1.json evidence-2.json evidence-3.json
+jev0 evidence-chain-verify evidence-*.json --repo-check --json
+jev0 evidence-chain-verify evidence-*.json \
+  --expect-first-base <trusted-base-sha> \
+  --expect-final-head <expected-head-sha>
+```
+
+Every member is first subjected to the full `evidence-verify` validation. The
+chain then requires each prior `head_sha` to equal the next `base_sha`, rejects
+duplicate evidence digests, and emits a deterministic `chain_sha256` over the
+ordered member digests. This detects reordered, duplicated, missing, or tampered
+segments when a continuous verification history is expected. Optional
+`--expect-first-base` and `--expect-final-head` pins require exact lowercase Git
+object IDs, preventing a different but internally contiguous chain from being
+substituted for the intended start or destination.
+
+The chain digest is an integrity identifier, not a signature or timestamp.
+Authenticity still depends on the trusted CI/artifact boundary that produced and
+retained each member. Use `--repo-check` when the referenced Git objects are
+available to revalidate every segment against repository state.
+
+### Bind evidence to CI provenance
+
+Trusted CI can wrap one validated evidence document with explicit GitHub Actions
+execution identity:
+
+```sh
+jev0 provenance-create evidence.json \
+  --repository OWNER/REPO \
+  --workflow-ref OWNER/REPO/.github/workflows/policy-gate.yml@refs/heads/main \
+  --run-id 123456 \
+  --run-attempt 1 \
+  --event-name pull_request_target \
+  --pr-number 42 > provenance.json
+
+jev0 provenance-verify provenance.json evidence.json \
+  --expect-repository OWNER/REPO \
+  --expect-run-id 123456
+```
+
+The provenance envelope binds repository, workflow ref, run ID/attempt, event,
+pull-request number, base/head object IDs, evidence digest, and verifier digest
+under a deterministic `provenance_sha256`. The repository policy workflow creates
+this envelope from trusted GitHub context and preserves it as a separate artifact
+without adding write, OIDC, or attestation permissions.
+
+This is **identity binding and integrity**, not cryptographic issuer
+authentication. Anyone able to manufacture arbitrary JSON can imitate the fields
+outside the trusted artifact boundary.
+
+### Cryptographic authenticity with Sigstore
+
+The repository includes a separate `workflow_run` signer for completed
+`policy-gate` runs. This privileged workflow never executes pull-request head
+content. It checks out only the default branch verifier, downloads the immutable
+evidence/provenance artifacts from the completed policy run, re-verifies their
+digest and CI identity bindings, and only then requests a GitHub OIDC identity to
+create a Sigstore-backed GitHub artifact attestation.
+
+The signed subject is the exact `jev0-range-evidence.json` file. The custom
+predicate is the verified `jev0-ci-provenance.json` envelope, so the
+cryptographic statement binds the evidence bytes to repository, workflow, source
+run, pull request, base/head commits, and verifier identity.
+
+The signer alone receives:
+
+```yaml
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+  attestations: write
+```
+
+The original `pull_request_target` policy gate remains read-only and does not
+receive OIDC or attestation privileges. The Sigstore bundle emitted by
+`actions/attest` is retained separately for offline verification in addition to
+GitHub's hosted attestation record.
+
+GitHub CLI verification can independently validate the artifact's cryptographic
+identity against the repository owner:
+
+```sh
+gh attestation verify jev0-range-evidence.json --repo OWNER/REPO
+```
+
+This is the trust transition from a self-consistent hash envelope to an
+externally verifiable cryptographic issuer identity.
+
+## GitHub ruleset audit
+
+Export a repository ruleset with GitHub CLI or the REST API, then audit it
+locally without giving jev0 network credentials:
+
+```sh
+gh api repos/OWNER/REPO/rulesets/RULESET_ID > ruleset.json
+jev0 ruleset-check ruleset.json --json
+```
+
+For a single-maintainer repository, add `--solo`:
+
+```sh
+jev0 ruleset-check ruleset.json --solo
+```
+
+Solo mode treats approval requirements that need another actor as blocking
+errors. The audit also cross-checks the current repository for CODEOWNERS and
+stable local workflow checks such as `jev0 gate` and `jev0 policy gate`.
+
+It detects configurations including:
+
+- required approvals or last-push approval that deadlock solo maintenance,
+- Code Owner review with no CODEOWNERS file,
+- a Required status checks rule with an empty check list,
+- repository gate checks that exist locally but are not required by the ruleset,
+- merge commits offered while linear history is required,
+- missing pull-request, deletion, or force-push protection.
+
+The command is read-only. It does not update GitHub settings. See
+[examples/github-ruleset-solo.json](examples/github-ruleset-solo.json) for a
+known-good solo baseline.
 
 ## Universal workflow
 
@@ -150,6 +553,36 @@ one staged text file with one added line, with OS caches retained. This is a
 local Layer 0 measurement, not a Linux result or a latency guarantee. Linux CI
 verifies correctness; Linux latency has not been measured here. Interpreter,
 Git, and policy overhead were not timed separately.
+
+## Capture blocked agent failures
+
+Failure capture is explicit opt-in and keeps the guard path dependency-free:
+
+```sh
+jev0 workspace --capture-failure
+jev0 staged --capture-failure
+jev0 range BASE HEAD --capture-failure
+
+jev0 failures list
+jev0 failures list --json
+jev0 failures show <failure-id>
+```
+
+When a guarded command is blocked, `--capture-failure` writes one
+content-addressed `jev0-failure/v1` JSON record under
+`.git/jev0/failures/`. The record is written atomically, repeated identical
+failures are idempotent, and the original block exit/status remains authoritative.
+
+The v1 record intentionally contains **no raw diff** and no repository path. It
+contains the guard action, bounded single-line reason, a SHA-256 repository
+fingerprint, current HEAD when available, explicit policy SHA-256 when available,
+and a content-derived `failure_id`. Capture is local-only; jev0 performs no
+network call and does not import a failure-analysis package.
+
+The neutral record is designed for downstream adapters such as
+`entropy-loop-core`, which can convert a captured deterministic failure into
+its own `FailureTrace` / `RegressionCase` model without becoming a jev0
+runtime dependency.
 
 ## Optional Layer 1 evaluators
 
