@@ -995,6 +995,7 @@ def capability_contract():
             "external_process_evaluator": backend_ready,
             "managed_pre_commit_hook": runtime_ready,
             "failure_capture": runtime_ready,
+            "supervise_pinned_baseline": runtime_ready,
             "supervise_allow_dirty_baseline": runtime_ready,
             "supervise_allow_untracked": runtime_ready,
             "range_evidence": runtime_ready,
