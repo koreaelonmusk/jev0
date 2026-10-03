@@ -10,6 +10,8 @@ Requires Python 3.9+ and Git.
 
 From a reviewed checkout:
 
+macOS / Linux:
+
 ```sh
 git clone https://github.com/koreaelonmusk/jev0.git
 cd jev0
@@ -20,6 +22,22 @@ export PATH="$HOME/.local/bin:$PATH"
 cd /path/to/your/project
 jev0 init
 ```
+
+Windows PowerShell:
+
+```powershell
+git clone https://github.com/koreaelonmusk/jev0.git
+cd jev0
+python -m unittest discover -s tests -p test_windows_process_controller.py -v
+.\install.ps1
+
+# Add the reported install directory to PATH yourself if needed.
+cd C:\path\to\your\project
+jev0 init
+```
+
+Both installers are offline and preserve conflicting existing targets. They do
+not modify shell profiles or PATH automatically.
 
 `init` installs a repository-local pre-commit hook. Existing hooks and custom
 `core.hooksPath` settings are preserved: integrate `jev0 staged` manually in
@@ -74,9 +92,9 @@ stderr line. Files and index entries are never rolled back or discarded.
 `run` forwards output and the command's exit status; timeout or launch failure
 returns **1**. Owned-process timeout, Git workspace/range guards, external
 process evaluation, and `supervise` core paths are CI-tested on macOS, Linux,
-and Windows. Hook installation and the shell installer remain POSIX-oriented
-ergonomics rather than a native Windows installer. Invalid CLI arguments return
-**2**.
+and Windows. Managed Git hooks are CI-tested on Git for Windows, and a native
+PowerShell installer is provided alongside the POSIX shell installer. Invalid CLI
+arguments return **2**.
 
 ## Supervise one owned agent process tree
 
