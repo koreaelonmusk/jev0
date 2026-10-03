@@ -67,6 +67,7 @@ class CapabilityContractTests(unittest.TestCase):
                 "external_process_evaluator",
                 "managed_pre_commit_hook",
                 "failure_capture",
+                "supervise_pinned_baseline",
                 "supervise_allow_dirty_baseline",
                 "supervise_allow_untracked",
                 "range_evidence",
@@ -95,6 +96,9 @@ class CapabilityContractTests(unittest.TestCase):
         self.assertTrue(any(line == "schema_version: 1" for line in lines))
         self.assertTrue(any(line.startswith("process_backend: ") for line in lines))
         self.assertTrue(any(line == "commands.capabilities: yes" for line in lines))
+        self.assertTrue(
+            any(line == "features.supervise_pinned_baseline: yes" for line in lines)
+        )
         self.assertTrue(
             any(line == "features.supervise_allow_untracked: yes" for line in lines)
         )

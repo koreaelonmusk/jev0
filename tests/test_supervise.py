@@ -339,5 +339,54 @@ class SuperviseTests(unittest.TestCase):
 
 
 
+    def test_supervise_allows_committed_change_within_pinned_budget(self):
+        code = (
+            "from pathlib import Path; import subprocess; "
+            "Path('base.txt').write_text('base\\nchanged\\n'); "
+            "subprocess.run(['git','add','base.txt'], check=True); "
+            "subprocess.run(['git','commit','-qm','agent change'], check=True)"
+        )
+        result = self.cli(
+            "supervise",
+            "--max-lines",
+            "2",
+            "--timeout",
+            "3",
+            "--interval",
+            "0.02",
+            "--",
+            sys.executable,
+            "-c",
+            code,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_supervise_blocks_commit_laundering_against_pinned_baseline(self):
+        code = (
+            "from pathlib import Path; import subprocess, time; "
+            "Path('base.txt').write_text('base\\n' + 'x\\n' * 20); "
+            "subprocess.run(['git','add','base.txt'], check=True); "
+            "subprocess.run(['git','commit','-qm','launder change'], check=True); "
+            "time.sleep(0.2)"
+        )
+        result = self.cli(
+            "supervise",
+            "--max-lines",
+            "1",
+            "--timeout",
+            "3",
+            "--interval",
+            "0.02",
+            "--",
+            sys.executable,
+            "-c",
+            code,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("supervise workspace violation", result.stderr)
+        self.assertIn("exceed budget", result.stderr)
+
+
+
 if __name__ == "__main__":
     unittest.main()

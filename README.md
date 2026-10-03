@@ -113,11 +113,13 @@ jev0 supervise \
   -- claude-code-or-other-agent ...
 ```
 
-`supervise` starts only from a clean Git workspace. This is intentional: a dirty
-baseline would make it impossible to attribute later policy violations to the
-supervised process. While the child is alive, jev0 repeatedly applies the same
-Layer 0 `workspace` rules used by the CLI. On a violation or timeout, jev0
-terminates only the owned process tree it created and returns exit 1.
+`supervise` pins the current HEAD commit before spawning the child and evaluates
+all later tracked changes against that immutable baseline. A supervised process
+therefore cannot erase its accumulated budget by committing changes and moving
+HEAD. By default the workspace must be clean at launch. While the child is alive,
+jev0 repeatedly applies the same Layer 0 rules against the pinned baseline and
+runs one final check after observing child exit. On a violation or timeout, jev0
+terminates the owned process tree and returns exit 1.
 
 The polling interval is a sampling cadence, **not** a 15 ms reaction guarantee.
 On POSIX, a child that creates a new session can escape the process group.
