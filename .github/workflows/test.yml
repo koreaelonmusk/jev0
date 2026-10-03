@@ -62,6 +62,27 @@ jobs:
         run: python -m compileall -q jev0.py tests scripts
       - name: Windows process contract
         run: python -m unittest discover -s tests -p test_windows_process_controller.py -v
+      - name: Windows installer contract
+        shell: pwsh
+        run: |
+          $env:JEV0_BIN_DIR = Join-Path $env:RUNNER_TEMP "jev0-bin"
+          pwsh -NoProfile -File ./install.ps1
+          if ($LASTEXITCODE -ne 0) { throw "first install failed" }
+          pwsh -NoProfile -File ./install.ps1
+          if ($LASTEXITCODE -ne 0) { throw "idempotent reinstall failed" }
+          & (Join-Path $env:JEV0_BIN_DIR "jev0.cmd") --version
+          if ($LASTEXITCODE -ne 0) { throw "installed CLI failed" }
+
+          Remove-Item -LiteralPath (Join-Path $env:JEV0_BIN_DIR "jev0.py") -Force
+          Set-Content -LiteralPath (Join-Path $env:JEV0_BIN_DIR "jev0.cmd") -Value "keep" -NoNewline
+          pwsh -NoProfile -File ./install.ps1
+          if ($LASTEXITCODE -eq 0) { throw "conflicting install unexpectedly succeeded" }
+          if (Test-Path -LiteralPath (Join-Path $env:JEV0_BIN_DIR "jev0.py")) {
+            throw "partial install was not rolled back"
+          }
+          if ((Get-Content -LiteralPath (Join-Path $env:JEV0_BIN_DIR "jev0.cmd") -Raw) -ne "keep") {
+            throw "conflicting existing launcher was modified"
+          }
       - name: CLI run smoke
         run: python jev0.py run --timeout 5 -- python -c "print('windows-owned-process-ok')"
 
