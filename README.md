@@ -66,6 +66,10 @@ jev0 run --timeout 30 -- python3 -m unittest discover -s tests
 jev0 doctor
 jev0 doctor --json
 
+# Negotiate machine-readable runtime/features before integration.
+jev0 capabilities
+jev0 capabilities --json
+
 # Validate and fingerprint one explicit Layer 0 policy manifest.
 jev0 policy .jev0.json
 jev0 policy .jev0.json --json
@@ -224,6 +228,18 @@ You can add this to the instruction file your agent actually reads:
 Cursor, Claude Code, Codex, and Windsurf can use this CLI wherever they can run
 local commands. Automatic interception in these tools has not been tested.
 See [docs/UNIVERSAL.md](docs/UNIVERSAL.md) for the vendor-neutral integration contract.
+
+## Capability negotiation
+
+`jev0 capabilities --json` is a repository-independent, versioned contract for
+external runtimes. It reports the current process backend, runtime readiness,
+contract schema versions, supported commands, supervision features, and available
+installer surfaces. Integrations should feature-negotiate against this contract
+instead of inferring support from a version string or README text.
+
+The capability contract is descriptive, not authority. A reported feature does
+not grant permission to use it; Extropy or another control plane must still
+supply the authorized policy and execution grant.
 
 ## Doctor
 
