@@ -970,7 +970,7 @@ def doctor(args):
     state["runtime_ready"] = bool(
         state["git_version"]
         and sys.version_info >= (3, 9)
-        and state["posix_process_groups"]
+        and os.name in ("posix", "nt")
     )
 
     if args.json:

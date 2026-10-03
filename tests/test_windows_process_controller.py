@@ -202,6 +202,23 @@ class WindowsProcessControllerTests(unittest.TestCase):
             self.assertIn("process group terminated", result.stderr)
 
     @unittest.skipUnless(os.name == "nt", "Windows-specific process contract")
+    def test_windows_doctor_reports_runtime_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self._init_repo(directory)
+            result = subprocess.run(
+                [sys.executable, str(CLI), "doctor", "--json"],
+                cwd=directory,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["runtime_ready"])
+            self.assertFalse(payload["posix_process_groups"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows-specific process contract")
     def test_windows_controller_is_selected(self):
         sys.path.insert(0, str(ROOT))
         import jev0  # type: ignore
