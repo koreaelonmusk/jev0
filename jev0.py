@@ -23,6 +23,7 @@ GIT_BOUNDED_READ_TIMEOUT = 30.0
 BASE_POLICY_READ_TIMEOUT = 5.0
 GIT_ERROR_BYTES = 8192
 DOCTOR_SCHEMA_VERSION = 1
+CAPABILITIES_SCHEMA_VERSION = 1
 DOCTOR_MAX_FILE_BYTES = 10_000_000
 DOCTOR_HOOK_PREFIX_BYTES = 16_384
 POLICY_SCHEMA_VERSION = 1
@@ -951,6 +952,80 @@ def doctor_repository_state():
     state["hook_enforced"] = python_exists and target_exists
     state["hook_status"] = "managed" if state["hook_enforced"] else "managed-stale"
     return state
+
+
+def capability_contract():
+    """Return the versioned machine-readable jev0 runtime capability contract."""
+
+    backend = (
+        "windows"
+        if os.name == "nt"
+        else "posix"
+        if os.name == "posix"
+        else "unsupported"
+    )
+    backend_ready = backend != "unsupported"
+    runtime_ready = bool(
+        git_version()
+        and sys.version_info >= (3, 9)
+        and backend_ready
+    )
+    return {
+        "schema_version": CAPABILITIES_SCHEMA_VERSION,
+        "version": VERSION,
+        "platform": sys.platform,
+        "process_backend": backend,
+        "runtime_ready": runtime_ready,
+        "contracts": {
+            "policy_schema_version": POLICY_SCHEMA_VERSION,
+            "failure": f"jev0-failure/v{FAILURE_SCHEMA_VERSION}",
+            "evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+            "provenance_schema_version": PROVENANCE_SCHEMA_VERSION,
+        },
+        "commands": {
+            "staged": runtime_ready,
+            "workspace": runtime_ready,
+            "range": runtime_ready,
+            "run": backend_ready,
+            "supervise": runtime_ready,
+            "doctor": True,
+            "capabilities": True,
+        },
+        "features": {
+            "external_process_evaluator": backend_ready,
+            "managed_pre_commit_hook": runtime_ready,
+            "failure_capture": runtime_ready,
+            "supervise_allow_dirty_baseline": runtime_ready,
+            "supervise_allow_untracked": runtime_ready,
+            "range_evidence": runtime_ready,
+            "evidence_verification": True,
+            "provenance_verification": True,
+        },
+        "installers": {
+            "posix_shell": True,
+            "windows_powershell": True,
+        },
+    }
+
+
+def capabilities(args):
+    contract = capability_contract()
+    if args.json:
+        print(json.dumps(contract, sort_keys=True, separators=(",", ":")))
+        return 0
+
+    print(f"schema_version: {contract['schema_version']}")
+    print(f"version: {contract['version']}")
+    print(f"platform: {contract['platform']}")
+    print(f"process_backend: {contract['process_backend']}")
+    print("runtime_ready: " + ("yes" if contract["runtime_ready"] else "no"))
+    for group in ("commands", "features", "installers"):
+        for key, value in sorted(contract[group].items()):
+            rendered = "yes" if value is True else "no" if value is False else str(value)
+            print(f"{group}.{key}: {rendered}")
+    for key, value in sorted(contract["contracts"].items()):
+        print(f"contracts.{key}: {value}")
+    return 0
 
 
 def doctor(args):
@@ -2711,6 +2786,8 @@ def main():
     failure_item.add_argument("failure_id")
     item = sub.add_parser("doctor")
     item.add_argument("--json", action="store_true")
+    item = sub.add_parser("capabilities")
+    item.add_argument("--json", action="store_true")
     item = sub.add_parser("policy")
     item.add_argument("path", type=policy_argument)
     item.add_argument("--json", action="store_true")
@@ -2780,6 +2857,7 @@ def main():
             "run": run,
             "supervise": supervise,
             "doctor": doctor,
+            "capabilities": capabilities,
             "policy": inspect_policy,
             "policy-check": policy_check,
             "evidence-verify": evidence_verify,

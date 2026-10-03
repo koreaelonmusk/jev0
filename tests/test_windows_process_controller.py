@@ -267,6 +267,23 @@ class WindowsProcessControllerTests(unittest.TestCase):
             self.assertFalse(payload["posix_process_groups"])
 
     @unittest.skipUnless(os.name == "nt", "Windows-specific process contract")
+    def test_windows_capabilities_report_supported_core_features(self):
+        result = subprocess.run(
+            [sys.executable, str(CLI), "capabilities", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["process_backend"], "windows")
+        self.assertTrue(payload["runtime_ready"])
+        self.assertTrue(payload["commands"]["supervise"])
+        self.assertTrue(payload["features"]["external_process_evaluator"])
+        self.assertTrue(payload["features"]["managed_pre_commit_hook"])
+        self.assertTrue(payload["installers"]["windows_powershell"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows-specific process contract")
     def test_windows_controller_is_selected(self):
         sys.path.insert(0, str(ROOT))
         import jev0  # type: ignore
