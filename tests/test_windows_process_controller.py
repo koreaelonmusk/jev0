@@ -202,6 +202,54 @@ class WindowsProcessControllerTests(unittest.TestCase):
             self.assertIn("process group terminated", result.stderr)
 
     @unittest.skipUnless(os.name == "nt", "Windows-specific process contract")
+    def test_windows_init_hook_blocks_invalid_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = self._init_repo(directory)
+
+            init = subprocess.run(
+                [
+                    sys.executable,
+                    str(CLI),
+                    "init",
+                    "--max-files",
+                    "5",
+                    "--max-lines",
+                    "50",
+                ],
+                cwd=directory,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(init.returncode, 0, init.stderr)
+
+            hook = Path(directory) / ".git" / "hooks" / "pre-commit"
+            self.assertTrue(hook.is_file())
+            hook_text = hook.read_text(encoding="utf-8")
+            self.assertIn("# jev0 managed pre-commit hook", hook_text)
+            self.assertIn(" staged ", hook_text)
+
+            model = Path(directory) / "weights.gguf"
+            model.write_text("model\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "add", "-f", "weights.gguf"],
+                cwd=directory,
+                env=env,
+                check=True,
+            )
+            commit = subprocess.run(
+                ["git", "commit", "-qm", "blocked"],
+                cwd=directory,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(commit.returncode, 0)
+            self.assertIn("model artifact", commit.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "Windows-specific process contract")
     def test_windows_doctor_reports_runtime_ready(self):
         with tempfile.TemporaryDirectory() as directory:
             env = self._init_repo(directory)
