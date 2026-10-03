@@ -75,12 +75,10 @@ jobs:
 
           Remove-Item -LiteralPath (Join-Path $env:JEV0_BIN_DIR "jev0.py") -Force
           Set-Content -LiteralPath (Join-Path $env:JEV0_BIN_DIR "jev0.cmd") -Value "keep" -NoNewline
-          $nativePreference = $PSNativeCommandUseErrorActionPreference
-          $PSNativeCommandUseErrorActionPreference = $false
-          pwsh -NoProfile -File ./install.ps1
-          $conflictExit = $LASTEXITCODE
-          $PSNativeCommandUseErrorActionPreference = $nativePreference
-          if ($conflictExit -eq 0) { throw "conflicting install unexpectedly succeeded" }
+          $conflict = Start-Process -FilePath "pwsh" `
+            -ArgumentList @("-NoProfile", "-File", "./install.ps1") `
+            -Wait -PassThru -NoNewWindow
+          if ($conflict.ExitCode -eq 0) { throw "conflicting install unexpectedly succeeded" }
           if (Test-Path -LiteralPath (Join-Path $env:JEV0_BIN_DIR "jev0.py")) {
             throw "partial install was not rolled back"
           }
