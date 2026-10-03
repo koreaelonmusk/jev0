@@ -1887,14 +1887,29 @@ def inspect_untracked_change_set():
     }
 
 
-def supervise_workspace_rules(args, allow_untracked):
-    """Apply Layer 0 to tracked changes plus opt-in bounded untracked files."""
+def supervise_workspace_rules(args, allow_untracked, baseline_sha):
+    """Apply Layer 0 against one immutable supervision baseline commit."""
+
+    tracked = inspect_change_set(["diff", baseline_sha])
 
     if not allow_untracked:
-        heuristic_rules(args, "workspace")
+        untracked = [
+            field
+            for field in git(
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+            ).split(b"\0")
+            if field
+        ]
+        if untracked:
+            path = os.fsdecode(untracked[0])
+            raise Blocked(f"untracked file requires staging/review: {path!r}")
+        enforce_change_set(args, "workspace", tracked)
         return
 
-    tracked = inspect_change_set(diff_prefix("workspace"))
     untracked = inspect_untracked_change_set()
     paths = tracked["paths"] + untracked["paths"]
     analysis = {
@@ -2658,12 +2673,18 @@ def require_clean_workspace():
 
 
 def supervise(args):
-    """Own one process group and terminate it when workspace policy is violated."""
+    """Own one process tree and enforce policy against a pinned baseline commit."""
 
     settings, _, _ = resolve_guard_settings(args)
     repository_root()
+    baseline_sha = resolve_commit("HEAD")
+
     if args.allow_dirty_baseline:
-        supervise_workspace_rules(settings, args.allow_untracked)
+        supervise_workspace_rules(
+            settings,
+            args.allow_untracked,
+            baseline_sha,
+        )
     else:
         require_clean_workspace()
 
@@ -2675,19 +2696,29 @@ def supervise(args):
     process = spawn_owned_process(command)
     deadline = time.monotonic() + args.timeout
 
+    def enforce_supervised_workspace():
+        try:
+            supervise_workspace_rules(
+                settings,
+                args.allow_untracked,
+                baseline_sha,
+            )
+        except Blocked as error:
+            terminate_process_group(process)
+            raise Blocked(
+                "supervise workspace violation; process group terminated: "
+                + str(error)
+            ) from None
+
     try:
         while True:
-            try:
-                supervise_workspace_rules(settings, args.allow_untracked)
-            except Blocked as error:
-                terminate_process_group(process)
-                raise Blocked(
-                    "supervise workspace violation; process group terminated: "
-                    + str(error)
-                ) from None
+            enforce_supervised_workspace()
 
             returncode = process.poll()
             if returncode is not None:
+                # Close the final-sample race: a fast child may mutate and exit
+                # after the previous sample but before poll() observes exit.
+                enforce_supervised_workspace()
                 return returncode if returncode >= 0 else 128 - returncode
 
             remaining = deadline - time.monotonic()
