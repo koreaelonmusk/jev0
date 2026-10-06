@@ -22,10 +22,10 @@ jobs:
         python: ['3.9', '3.13']
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
       - name: Syntax
@@ -39,3 +39,65 @@ jobs:
           python3 jev0.py --version
           python3 jev0.py workspace
           python3 jev0.py doctor --json
+          python3 jev0.py range HEAD HEAD
+          python3 jev0.py policy examples/policy.json --json
+          python3 jev0.py policy .github/jev0-policy.json --json
+          python3 jev0.py ruleset-check examples/github-ruleset-solo.json --solo --json
+          python3 jev0.py range-report HEAD HEAD > "$RUNNER_TEMP/jev0-evidence.json"
+          python3 jev0.py evidence-verify "$RUNNER_TEMP/jev0-evidence.json" \
+            --require-current-verifier --repo-check
+
+  windows-process:
+    name: windows process ownership
+    timeout-minutes: 10
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Syntax
+        run: python -m compileall -q jev0.py tests scripts
+      - name: Windows process contract
+        run: python -m unittest discover -s tests -p test_windows_process_controller.py -v
+      - name: Windows installer contract
+        shell: pwsh
+        run: |
+          $env:JEV0_BIN_DIR = Join-Path $env:RUNNER_TEMP "jev0-bin"
+          pwsh -NoProfile -File ./install.ps1
+          if ($LASTEXITCODE -ne 0) { throw "first install failed" }
+          pwsh -NoProfile -File ./install.ps1
+          if ($LASTEXITCODE -ne 0) { throw "idempotent reinstall failed" }
+          & (Join-Path $env:JEV0_BIN_DIR "jev0.cmd") --version
+          if ($LASTEXITCODE -ne 0) { throw "installed CLI failed" }
+
+          Remove-Item -LiteralPath (Join-Path $env:JEV0_BIN_DIR "jev0.py") -Force
+          Set-Content -LiteralPath (Join-Path $env:JEV0_BIN_DIR "jev0.cmd") -Value "keep" -NoNewline
+          $conflict = Start-Process -FilePath "pwsh" `
+            -ArgumentList @("-NoProfile", "-File", "./install.ps1") `
+            -Wait -PassThru -NoNewWindow
+          if ($conflict.ExitCode -eq 0) { throw "conflicting install unexpectedly succeeded" }
+          if (Test-Path -LiteralPath (Join-Path $env:JEV0_BIN_DIR "jev0.py")) {
+            throw "partial install was not rolled back"
+          }
+          if ((Get-Content -LiteralPath (Join-Path $env:JEV0_BIN_DIR "jev0.cmd") -Raw) -ne "keep") {
+            throw "conflicting existing launcher was modified"
+          }
+      - name: CLI run smoke
+        run: python jev0.py run --timeout 5 -- python -c "print('windows-owned-process-ok')"
+
+  gate:
+    name: jev0 gate
+    if: ${{ always() }}
+    needs: [test, windows-process]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require full matrix
+        env:
+          MATRIX_RESULT: ${{ needs.test.result }}
+          WINDOWS_RESULT: ${{ needs.windows-process.result }}
+        run: |
+          test "$MATRIX_RESULT" = "success"
+          test "$WINDOWS_RESULT" = "success"

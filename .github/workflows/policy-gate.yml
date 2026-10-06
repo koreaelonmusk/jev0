@@ -1,0 +1,134 @@
+name: policy-gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jev0-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: jev0 policy gate
+    if: ${{ github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # SECURITY: checkout only the trusted base commit. Never checkout or execute PR head code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Fetch PR head as Git data only
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git fetch --no-tags --depth=1 origin \
+            "refs/pull/${PR_NUMBER}/head:refs/remotes/jev0/pr-head"
+      - name: Verify trusted base policy
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          HEAD_SHA=$(git rev-parse refs/remotes/jev0/pr-head)
+          test "$HEAD_SHA" = "$EXPECTED_HEAD_SHA"
+
+          EVIDENCE="$RUNNER_TEMP/jev0-range-evidence.json"
+          set +e
+          python3 jev0.py range-report "$BASE_SHA" "$HEAD_SHA" \
+            --base-policy .github/jev0-policy.json > "$EVIDENCE"
+          STATUS=$?
+          set -e
+
+          # Keep the canonical compact JSON in the trusted workflow log.
+          cat "$EVIDENCE"
+
+          # Render bounded, injection-safe headline fields in the human-facing summary.
+          python3 scripts/evidence_summary.py "$EVIDENCE" >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$STATUS"
+
+      - name: Create CI provenance envelope
+        if: ${{ always() }}
+        env:
+          EVIDENCE: ${{ runner.temp }}/jev0-range-evidence.json
+          PROVENANCE: ${{ runner.temp }}/jev0-ci-provenance.json
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -f "$EVIDENCE" ]; then
+            python3 jev0.py provenance-create "$EVIDENCE" \
+              --repository "$REPOSITORY" \
+              --workflow-ref "$WORKFLOW_REF" \
+              --run-id "$RUN_ID" \
+              --run-attempt "$RUN_ATTEMPT" \
+              --event-name "$EVENT_NAME" \
+              --pr-number "$PR_NUMBER" \
+              --require-current-verifier \
+              --repo-check > "$PROVENANCE"
+            cat "$PROVENANCE"
+          fi
+
+      - name: Preserve canonical policy evidence
+        id: evidence_artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          path: ${{ runner.temp }}/jev0-range-evidence.json
+          archive: false
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Preserve CI provenance envelope
+        id: provenance_artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          path: ${{ runner.temp }}/jev0-ci-provenance.json
+          archive: false
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Summarize evidence artifact
+        if: ${{ always() && steps.evidence_artifact.outputs.artifact-id != '' }}
+        env:
+          ARTIFACT_ID: ${{ steps.evidence_artifact.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.evidence_artifact.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.evidence_artifact.outputs.artifact-digest }}
+        run: |
+          {
+            echo
+            echo "### jev0 evidence artifact"
+            echo
+            echo "- artifact id: `$ARTIFACT_ID`"
+            echo "- artifact digest: `$ARTIFACT_DIGEST`"
+            echo "- artifact url: $ARTIFACT_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Summarize provenance artifact
+        if: ${{ always() && steps.provenance_artifact.outputs.artifact-id != '' }}
+        env:
+          ARTIFACT_ID: ${{ steps.provenance_artifact.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.provenance_artifact.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.provenance_artifact.outputs.artifact-digest }}
+        run: |
+          {
+            echo
+            echo "### jev0 CI provenance artifact"
+            echo
+            echo "- artifact id: `$ARTIFACT_ID`"
+            echo "- artifact digest: `$ARTIFACT_DIGEST`"
+            echo "- artifact url: $ARTIFACT_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
